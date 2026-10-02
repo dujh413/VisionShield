@@ -230,3 +230,6 @@ captures/
 *.onnx
 *.pdiparams
 *.pdmodel
+
+# Development artifacts and local workspace helpers
+test_artifacts/
