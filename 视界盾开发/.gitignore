@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+models/*.task
+models/*.onnx
+private/
+records/*.csv
+records/*.json
