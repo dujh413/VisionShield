@@ -30,7 +30,6 @@ MANIFEST
 #   Usually these files are written by a python script from a template
 #   before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
-*.spec
 
 # Installer logs
 pip-log.txt
@@ -216,3 +215,18 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# VisionShield: local models, identities and captured content
+models/
+private/
+records/
+screenshots/
+captures/
+.env.*
+!.env.example
+
+# Local generated media and identity templates (curated fixtures belong outside these directories)
+*.npz
+*.onnx
+*.pdiparams
+*.pdmodel
