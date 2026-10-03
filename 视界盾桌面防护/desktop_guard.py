@@ -70,7 +70,8 @@ class ControlPanel(QWidget):
             self.overlay.set_masks([], full=True)
             self.capture.close()
             self.capture=CaptureWorker()
-            self.raise_()
+            if self.isVisible():
+                self.raise_()
             self.bridge = IdentityBridge()
             self.worker = OCRWorker(self.root)
             self.state = ProtectionState()
