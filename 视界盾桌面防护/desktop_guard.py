@@ -9,16 +9,17 @@ import time
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget
 
-from screen_capture import ScreenCapture, CaptureWorker, change_regions, enable_dpi, same_image
-from sensitive_rules import detect, rect_of
+from screen_capture import ScreenCapture, CaptureWorker, enable_dpi
+from sensitive_rules import rect_of
 from identity_bridge import IdentityBridge
 from ocr_worker import OCRWorker
 from overlay_window import OverlayWindow, exclude_capture
 from protection_state import ProtectionState
+from content_index import ContentIndex
 
 
 class ControlPanel(QWidget):
-    def __init__(self, semantic=False):
+    def __init__(self, semantic=False, integrated=False):
         super().__init__()
         self.setWindowTitle('视界盾 · 主屏自动防护')
         from PySide6.QtCore import Qt
@@ -36,6 +37,14 @@ class ControlPanel(QWidget):
         quit_button.clicked.connect(self.close)
         self.resize(420, 230)
         self.capture = self.worker = self.overlay = self.bridge = None
+        self.camera = None
+        self.integrated = integrated
+        self.content = ContentIndex()
+        self.alert_message = None
+        self.last_risk = False
+        self.last_alert_at = -100
+        self.last_ocr_finished = None
+        self.protecting = True
         self.timer = QTimer(self)
         self.timer.setInterval(20)
         self.timer.timeout.connect(self.tick)
@@ -72,12 +81,18 @@ class ControlPanel(QWidget):
             self.capture=CaptureWorker()
             if self.isVisible():
                 self.raise_()
-            self.bridge = IdentityBridge()
+            if self.integrated:
+                from camera_worker import CameraWorker
+                self.camera = CameraWorker()
+            else:
+                self.bridge = IdentityBridge()
             self.worker = OCRWorker(self.root)
             self.state = ProtectionState()
             self.latest = self.valid_image = None
             self.hits, self.last_capture = [], 0
             self.error, self.ready = None, False
+            self.content = ContentIndex()
+            self.last_risk, self.alert_message, self.last_ocr_finished = False, None, None
             records = self.root/'records'
             records.mkdir(exist_ok=True)
             self.log = (records/f"guard_{datetime.now():%Y%m%d_%H%M%S_%f}.csv").open('w', encoding='utf-8-sig', newline='')
@@ -93,7 +108,7 @@ class ControlPanel(QWidget):
 
     def pause(self):
         self.timer.stop()
-        for name in ('overlay', 'capture', 'worker', 'bridge'):
+        for name in ('overlay', 'capture', 'worker', 'camera', 'bridge'):
             obj = getattr(self, name, None)
             if obj is not None:
                 obj.close()
@@ -103,47 +118,52 @@ class ControlPanel(QWidget):
             self.log = self.writer = None
         self.latest = self.valid_image = None
         self.hits = []
+        self.content = ContentIndex()
         self.status.setText('已暂停：当前桌面不受本软件保护。')
 
     def tick(self):
         try:
             now = time.monotonic()
-            self.bridge.poll()
-            risk, reason = self.bridge.risk(now)
+            sensor = self.camera if self.integrated else self.bridge
+            sensor.poll()
+            risk, reason = sensor.risk(now)
+            confirmed_risk = not self.integrated or sensor.last is not None or sensor.error is not None
+            if risk and confirmed_risk and not self.last_risk and now-self.last_alert_at>=10:
+                self.alert_message = reason+'，已启用隐私遮蔽。'
+                self.last_alert_at = now
+            self.last_risk = risk if confirmed_risk else False
             ocr_ms = None
             if now-self.last_capture >= 0.1:
                 frame = self.capture.latest()
                 self.last_capture = now
                 if frame is not None:
-                    old = self.latest
                     self.latest = frame
-                    changed = old is None or not same_image(old.image, frame.image)
-                    if changed:
-                        self.valid_image, self.hits = None, []
+                    self.content.update(frame.image)
                     # 未有有效OCR时持续提交最新帧；队列最大1。
-                    if self.ready and self.valid_image is None and not self.error:
+                    if self.ready and not self.error:
                         self.worker.submit(frame)
             for item in self.worker.poll():
                 if item.get('ready'):
                     self.ready = True
                 elif 'error' in item:
                     self.error = 'OCR异常：'+item['error']
-                elif (self.latest is not None and
-                      now-item['captured_at'] <= 10 and
-                      same_image(item['image'], self.latest.image)):
-                    self.hits = detect(item['lines'], self.semantic)
-                    self.valid_image = item['image']
-                    ocr_ms = item['elapsed_ms']
+                elif self.latest is not None and now-item['captured_at'] <= 10:
+                    if self.content.accept(item['image'],item['lines'],self.semantic):
+                        self.last_ocr_finished = now
+                        ocr_ms = item['elapsed_ms']
+            self.hits = self.content.hits
+            self.valid_image = self.content.image if self.last_ocr_finished is not None else None
             if not self.worker.process.is_alive():
                 self.error = self.error or 'OCR进程已退出'
-            if self.valid_image is None and now-self.started > 30 and self.ready:
+            stale = (self.last_ocr_finished is None and now-self.started>30) or (self.last_ocr_finished is not None and now-self.last_ocr_finished>15)
+            if stale:
                 # 持续动画或OCR过慢时不将陈旧结果当作有效坐标。
-                reason += '；画面持续变化或OCR尚未完成'
+                reason += '；OCR结果未及时更新，临时保护'
             protecting = self.state.update(now, risk or bool(self.error))
-            valid = self.latest is not None and self.valid_image is not None
-            full = protecting and (not valid or bool(self.error))
-            rectangles = [rect_of(hit['polygon']) for hit in self.hits] if protecting and valid else []
-            self.overlay.set_masks(rectangles, full=full)
+            self.protecting = protecting
+            full = protecting and (self.latest is None or self.last_ocr_finished is None or bool(self.error) or stale)
+            rectangles = ([rect_of(hit['polygon']) for hit in self.hits]+self.content.pending_rectangles()) if protecting else []
+            self.overlay.set_masks(rectangles, full=full, image=self.latest.image if self.latest is not None else None)
             state = '异常全屏保护' if self.error else '临时全屏保护' if full else '敏感行保护' if protecting else '正常显示'
             self.status.setText(f'{state} · {reason}\nOCR：'+('异常' if self.error else '已就绪' if self.ready else '加载中'))
             self.detail.setText(f'有效敏感行：{len(self.hits)}；范围：主显示器\n' +
@@ -157,6 +177,8 @@ class ControlPanel(QWidget):
                 self.last_log_state = summary
         except Exception as error:
             # 保留可点击的控制面板；异常时不静默恢复内容。
+            self.error = '控制流程异常：'+type(error).__name__
+            self.protecting = True
             if self.overlay:
                 self.overlay.set_masks([], full=True)
             self.timer.stop()

@@ -12,19 +12,22 @@ def main():
     enable_dpi()
     app = QApplication([])
     app.setQuitOnLastWindowClosed(False)
-    panel = ControlPanel()
+    panel = ControlPanel(integrated=True)
     socket = QLocalSocket()
     socket.connectToServer(sys.argv[-1])
     if not socket.waitForConnected(3000):
         return 1
     stop_requested = False
+    command_buffer = b''
 
     def request_stop():
         nonlocal stop_requested
         stop_requested = True
 
     def read_commands():
-        if b'stop' in bytes(socket.readAll()):
+        nonlocal command_buffer
+        command_buffer = (command_buffer+bytes(socket.readAll()))[-64:]
+        if b'stop' in command_buffer:
             request_stop()
 
     socket.readyRead.connect(read_commands)
@@ -47,11 +50,20 @@ def main():
             app.quit()
             return
         status = panel.status.text()
-        state = 'running' if panel.timer.isActive() else 'error'
-        snapshot = (state, status)
-        if snapshot != last_status:
-            print('VISION_SHIELD:'+json.dumps({'state': state, 'detail': status}, ensure_ascii=True), flush=True)
+        failed = panel.error or (panel.camera.error if panel.camera else None)
+        state = 'running' if panel.timer.isActive() and not failed else 'error'
+        snapshot = (state, status, len(panel.hits))
+        alert = panel.alert_message
+        if snapshot != last_status or alert:
+            print('VISION_SHIELD:'+json.dumps({'state': state, 'detail': status,
+                  'alert':alert,'sensitive_lines':len(panel.hits),
+                  'protecting':panel.protecting,
+                  'owner_verified':bool(panel.camera and panel.camera.last and panel.camera.last['owner_verified']),
+                  'faces_count':panel.camera.last['faces_count'] if panel.camera and panel.camera.last else None,
+                  'full_mask':panel.overlay.full if panel.overlay else False,
+                  'blur_regions':len(panel.overlay.blurs) if panel.overlay else 0}, ensure_ascii=True), flush=True)
             last_status = snapshot
+            panel.alert_message = None
 
     timer = QTimer()
     timer.timeout.connect(tick)
