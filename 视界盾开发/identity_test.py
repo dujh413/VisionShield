@@ -21,8 +21,21 @@ def load_models(root):
     empty = np.empty(0, dtype=np.uint8)
     detector = cv2.FaceDetectorYN.create(
         'onnx', detector_buffer, empty, (640, 480), 0.9)
-    recognizer = cv2.FaceRecognizerSF.create(
-        'onnx', recognizer_buffer, empty)
+    try:
+        recognizer = cv2.FaceRecognizerSF.create('onnx', recognizer_buffer, empty)
+    except TypeError:
+        # 较旧OpenCV仅支持文件参数；本机模型缓存使用英文路径。
+        import os
+        import shutil
+        cache = Path(os.environ.get('LOCALAPPDATA', str(Path.home())))/'VisionShield/face_models'
+        cache.mkdir(parents=True, exist_ok=True)
+        target = cache/'face_recognition_sface_2021dec.onnx'
+        if not str(target).isascii():
+            raise RuntimeError('当前OpenCV需要英文模型路径，请升级OpenCV后重试')
+        source = root/'models/face_recognition_sface_2021dec.onnx'
+        if not target.exists() or target.read_bytes() != source.read_bytes():
+            shutil.copyfile(source, target)
+        recognizer = cv2.FaceRecognizerSF.create(str(target), '')
     return detector, recognizer
 
 

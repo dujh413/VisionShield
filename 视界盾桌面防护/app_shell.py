@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBo
 
 class Backend(QObject):
     changed = Signal(str, str)
+    alerted = Signal(str)
+    updated = Signal(dict)
     stopped = Signal()
 
     def __init__(self, parent=None):
@@ -46,7 +48,10 @@ class Backend(QObject):
             return
         launcher = str(Path(__file__).resolve().parents[1]/'VisionShield.py')
         arguments = ['--backend-service', name] if getattr(sys, 'frozen', False) else [launcher, '--backend-service', name]
-        self.process.start(sys.executable, arguments)
+        executable = sys.executable
+        if not getattr(sys,'frozen',False) and Path(executable).name.lower()=='pythonw.exe':
+            executable = str(Path(executable).with_name('python.exe'))
+        self.process.start(executable, arguments)
 
     def stop(self):
         self.stopping = True
@@ -69,7 +74,10 @@ class Backend(QObject):
             except (ValueError, UnicodeError):
                 continue
             if not self.stopping:
+                self.updated.emit(value)
                 self.changed.emit(value['state'], value['detail'])
+                if value.get('alert'):
+                    self.alerted.emit(value['alert'])
 
     def discard_errors(self):
         self.process.readAllStandardError()  # 排空输出，避免后台长期累积。
@@ -179,6 +187,8 @@ class Shell(QWidget):
             hide_button.hide()
         self.backend.changed.connect(self.backend_changed)
         self.backend.stopped.connect(self.backend_stopped)
+        if hasattr(self.backend,'alerted'):
+            self.backend.alerted.connect(self.remind_owner)
         self.set_state('paused')
 
     def set_state(self, state, detail=None):
@@ -225,6 +235,11 @@ class Shell(QWidget):
         elif self.state != 'error':
             self.set_state('paused')
 
+    def remind_owner(self, message):
+        if self.has_tray:
+            self.tray.showMessage('视界盾隐私提醒', message, QSystemTrayIcon.Warning, 4000)
+        QApplication.beep()
+
     def show_panel(self):
         self.showNormal()
         self.raise_()
@@ -246,6 +261,16 @@ class Shell(QWidget):
         layout.addWidget(auto)
         layout.addWidget(hidden)
         layout.addWidget(QLabel('设置在下次打开软件时生效。'))
+        enroll = QPushButton('登记 / 更新机主')
+        layout.addWidget(enroll)
+        def register():
+            if self.state != 'paused':
+                self.detail.setText('请先暂停防护，再登记机主。')
+                dialog.reject()
+                return
+            dialog.accept()
+            self.register_owner()
+        enroll.clicked.connect(register)
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Save).setText('保存')
         buttons.button(QDialogButtonBox.Cancel).setText('取消')
@@ -257,6 +282,13 @@ class Shell(QWidget):
             self.settings.setValue('start_hidden', hidden.isChecked())
             self.settings.sync()
         dialog.deleteLater()
+
+    def register_owner(self):
+        if self.preview:
+            self.detail.setText('预览模式不打开摄像头。')
+            return
+        from owner_enrollment import EnrollmentDialog
+        EnrollmentDialog(self).exec()
 
     def quit_app(self):
         self.quitting = True

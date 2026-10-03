@@ -2,13 +2,14 @@ import os
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 import sys
 import subprocess
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 from PySide6.QtCore import QObject, QSettings, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QDialogButtonBox
-from app_shell import Shell
+from app_shell import Shell, Backend
 
 
 class FakeBackend(QObject):
@@ -83,6 +84,27 @@ class ShellTests(unittest.TestCase):
         self.panel.toggle_guard()
         self.assertEqual(self.backend.starts, 0)
         self.assertEqual(self.panel.state, 'paused')
+
+    def test_service_status_delivers_reminder_and_stopping_ignores_it(self):
+        backend=Backend()
+        alerts=[];updates=[]
+        backend.alerted.connect(alerts.append)
+        backend.updated.connect(updates.append)
+        data={'state':'running','detail':'测试保护状态','alert':'测试隐私提醒','protecting':True}
+        encoded=('VISION_SHIELD:'+json.dumps(data)+'\n').encode()
+        with patch.object(backend.process,'readAllStandardOutput',return_value=encoded):
+            backend.read_status()
+            backend.stopping=True
+            backend.read_status()
+        self.assertEqual(alerts,['测试隐私提醒'])
+        self.assertEqual(updates,[data])
+
+    def test_reminder_uses_tray_and_sound(self):
+        self.panel.has_tray=True
+        with patch.object(self.panel.tray,'showMessage') as toast,patch('app_shell.QApplication') as application:
+            self.panel.remind_owner('虚构测试风险')
+            toast.assert_called_once()
+            application.beep.assert_called_once()
 
     def test_close_hides_without_stopping_when_tray_exists(self):
         self.panel.has_tray = True

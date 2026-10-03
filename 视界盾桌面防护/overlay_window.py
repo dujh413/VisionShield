@@ -1,7 +1,7 @@
 import ctypes
 from ctypes import wintypes
 from PySide6.QtCore import Qt, QRectF
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QPainter, QImage
 from PySide6.QtWidgets import QWidget
 
 
@@ -29,11 +29,34 @@ class OverlayWindow(QWidget):
         self.setGeometry(screen.geometry())
         self.rectangles = []
         self.full = False
+        self.blurs = []
+        self.mask_image = None
         self.show()
         exclude_capture(self)
 
-    def set_masks(self, rectangles, full=False):
+    def set_masks(self, rectangles, full=False, image=None):
+        if self.mask_image is image and self.rectangles == rectangles and self.full == full:
+            return
+        self.mask_image = image
         self.rectangles, self.full = rectangles, full
+        self.blurs = []
+        if image is not None and not full:
+            import cv2
+            height,width = image.shape[:2]
+            for x,y,w,h in rectangles:
+                x1,y1 = max(0,int(x)-8),max(0,int(y)-8)
+                x2,y2 = min(width,int(x+w)+8),min(height,int(y+h)+8)
+                if x2<=x1 or y2<=y1:
+                    continue
+                roi = image[y1:y2,x1:x2]
+                # 强像素化后模糊，再压暗；绘制不透明图像，避免透出原字形。
+                small = cv2.resize(roi,(max(1,(x2-x1)//32),max(1,(y2-y1)//32)),interpolation=cv2.INTER_AREA)
+                small = cv2.GaussianBlur(small,(3,3),0)
+                obscured = cv2.resize(small,(x2-x1,y2-y1),interpolation=cv2.INTER_LINEAR)
+                obscured = (obscured*.45).astype('uint8')
+                rgb = cv2.cvtColor(obscured,cv2.COLOR_BGR2RGB)
+                qimage = QImage(rgb.data,rgb.shape[1],rgb.shape[0],rgb.strides[0],QImage.Format_RGB888).copy()
+                self.blurs.append(((x1,y1,x2-x1,y2-y1),qimage))
         self.update()
 
     def paintEvent(self, event):
@@ -45,6 +68,10 @@ class OverlayWindow(QWidget):
         else:
             # mss为物理像素；Qt窗口内坐标为逻辑像素。
             ratio = self.devicePixelRatioF()
+            if self.blurs:
+                for (x,y,width,height),image in self.blurs:
+                    painter.drawImage(QRectF(x/ratio,y/ratio,width/ratio,height/ratio),image)
+                return
             for x, y, width, height in self.rectangles:
                 painter.drawRect(QRectF((x-6)/ratio, (y-6)/ratio,
                                        (width+12)/ratio, (height+12)/ratio))
