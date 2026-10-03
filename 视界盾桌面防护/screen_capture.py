@@ -1,6 +1,5 @@
 import ctypes
 import time
-import mss
 import numpy as np
 import queue
 import threading
@@ -21,10 +20,13 @@ class Frame:
     captured_at: float
     monitor_rect: dict
     image: np.ndarray
+    capture_ms: float = 0.0
+    submitted_at: float = 0.0
 
 
 class ScreenCapture:
     def __init__(self):
+        import mss
         self.source = mss.mss()
         # 主屏物理坐标原点为(0,0)，不假定mss.monitors[1]一定为主屏。
         self.monitor = next((dict(m) for m in self.source.monitors[1:]
@@ -38,7 +40,7 @@ class ScreenCapture:
         started=time.monotonic()
         self.sequence += 1
         image = np.asarray(self.source.grab(self.monitor))[:, :, :3].copy()
-        return Frame(self.sequence, started, self.monitor, image)
+        return Frame(self.sequence, started, self.monitor, image, (time.monotonic()-started)*1000)
 
     def close(self):
         self.source.close()
@@ -98,3 +100,4 @@ def change_regions(first, second, tile=64):
             if mask[y:y+tile, x:x+tile].any():
                 regions.append((x, y, min(tile, width-x), min(tile, height-y)))
     return regions
+
