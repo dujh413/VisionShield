@@ -4,6 +4,7 @@ from pathlib import Path
 import queue
 import sys
 import time
+from runtime_paths import camera_root, owner_file
 
 
 def camera_main(root, stop, outputs, preview=False):
@@ -19,7 +20,7 @@ def camera_main(root, stop, outputs, preview=False):
         from ocr_worker import put_latest
         cv2.setNumThreads(1)
         detector, recognizer = load_models(Path(root))
-        path = Path(root)/'private/owner_templates.npz'
+        path = owner_file(root)
         templates = None
         if path.exists():
             with np.load(path, allow_pickle=False) as data:
@@ -79,7 +80,7 @@ class CameraWorker:
     def __init__(self, preview=False):
         ctx = mp.get_context('spawn')
         self.stop, self.outputs = ctx.Event(), ctx.Queue(2)
-        root = Path(__file__).resolve().parents[1]/'视界盾开发'
+        root = camera_root()
         self.process = ctx.Process(target=camera_main, args=(root,self.stop,self.outputs,preview), daemon=True)
         self.process.start()
         self.last, self.error = None, None

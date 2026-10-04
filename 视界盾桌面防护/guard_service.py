@@ -56,13 +56,15 @@ def main():
         snapshot = (state, status, len(panel.hits))
         alert = panel.alert_message
         if snapshot != last_status or alert:
-            print('VISION_SHIELD:'+json.dumps({'state': state, 'detail': status,
+            packet = 'VISION_SHIELD:'+json.dumps({'state': state, 'detail': status,
                   'alert':alert,'sensitive_lines':len(panel.hits),
                   'protecting':panel.protecting,
                   'owner_verified':bool(panel.camera and panel.camera.last and panel.camera.last['owner_verified']),
                   'faces_count':panel.camera.last['faces_count'] if panel.camera and panel.camera.last else None,
                   'full_mask':panel.overlay.full if panel.overlay else False,
-                  'blur_regions':len(panel.overlay.blurs) if panel.overlay else 0}, ensure_ascii=True), flush=True)
+                  'blur_regions':len(panel.overlay.blurs) if panel.overlay else 0}, ensure_ascii=True)+'\n'
+            socket.write(packet.encode('utf-8'))
+            socket.flush()
             last_status = snapshot
             panel.alert_message = None
 

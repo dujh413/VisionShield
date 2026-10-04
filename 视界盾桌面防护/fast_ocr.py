@@ -3,9 +3,9 @@ import onnxruntime as ort
 import cv2
 import numpy as np
 import time
-from pathlib import Path
 from gpu_adapter import preferred_adapter
 from rapidocr_onnxruntime import RapidOCR
+from runtime_paths import desktop_root
 
 
 class FastOCR:
@@ -13,7 +13,7 @@ class FastOCR:
         # OpenCV并行与ORT线程竞争会放大延迟；图像预处理固定单线程。
         cv2.setNumThreads(1)
         use_dml=gpu and 'DmlExecutionProvider' in ort.get_available_providers()
-        models=Path(__file__).resolve().parent/'models/rapid_onnx'
+        models=desktop_root()/'models/rapid_onnx'
         if not (models/'ch_PP-OCRv4_det_infer.onnx').exists():
             raise RuntimeError('缺少ONNX模型，请先运行prepare_fast_models.py')
         # GPU检测与固定形状批量识别；无DirectML时回退CPU。
