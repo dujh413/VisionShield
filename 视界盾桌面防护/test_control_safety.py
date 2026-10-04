@@ -64,6 +64,50 @@ class ControlSafetyTests(unittest.TestCase):
         self.tick()
         self.assertTrue(self.panel.protecting)
 
+    def test_detection_only_keeps_alert_without_shielding(self):
+        self.panel.shield_enabled = False
+        self.panel.camera.risk.return_value = (True, '检测到旁人')
+        self.tick()
+        self.assertFalse(self.panel.protecting)
+        self.assertFalse(self.panel.overlay.set_masks.call_args.kwargs['full'])
+        self.assertEqual(self.panel.overlay.set_masks.call_args.args[0], [])
+        self.assertIn('遮蔽已关闭', self.panel.alert_message)
+        self.assertIn('不遮蔽', self.panel.status.text())
+
+    def test_detection_only_does_not_shield_on_capture_or_ocr_stall(self):
+        self.panel.shield_enabled = False
+        self.panel.latest.captured_at = self.now-2
+        self.panel.last_ocr_finished = self.now-20
+        self.tick()
+        self.assertFalse(self.panel.protecting)
+        self.assertFalse(self.panel.overlay.set_masks.call_args.kwargs['full'])
+
+    def test_detection_only_does_not_shield_on_exception(self):
+        self.panel.shield_enabled = False
+        self.panel.camera.poll.side_effect = RuntimeError('synthetic error')
+        with patch('traceback.print_exc'):
+            self.tick()
+        self.assertFalse(self.panel.protecting)
+        self.assertFalse(self.panel.overlay.set_masks.call_args.kwargs['full'])
+        self.assertIn('遮蔽已关闭', self.panel.status.text())
+
+    def test_detection_only_start_skips_visible_capture_probe(self):
+        self.panel.shield_enabled = False
+        screen = self.app.primaryScreen()
+        capture = Mock(monitor={'width':screen.geometry().width()*screen.devicePixelRatio(),
+                                'height':screen.geometry().height()*screen.devicePixelRatio()})
+        with patch('desktop_guard.ScreenCapture', return_value=capture), \
+                patch('desktop_guard.CaptureWorker'), patch('desktop_guard.OCRWorker'), \
+                patch('camera_worker.CameraWorker'), patch('desktop_guard.OverlayWindow') as overlay, \
+                patch('desktop_guard.Path.open'), patch('capture_probe.verify_exclusion') as probe, \
+                patch('desktop_guard.exclude_capture'):
+            self.panel.start()
+        probe.assert_not_called()
+        overlay.return_value.hide.assert_called_once()
+        overlay.return_value.set_masks.assert_not_called()
+        self.assertTrue(self.panel.timer.isActive())
+        self.assertIn('不遮蔽', self.panel.status.text())
+
     def test_pause_attempts_all_resources_when_one_close_fails(self):
         self.panel.overlay.close.side_effect=RuntimeError('test close failure')
         worker,camera=self.panel.worker,self.panel.camera

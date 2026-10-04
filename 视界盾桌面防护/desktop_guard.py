@@ -19,8 +19,9 @@ from content_index import ContentIndex
 
 
 class ControlPanel(QWidget):
-    def __init__(self, semantic=False, integrated=False):
+    def __init__(self, semantic=False, integrated=False, shield_enabled=True):
         super().__init__()
+        self.shield_enabled = shield_enabled
         self.setWindowTitle('视界盾 · 主屏自动防护')
         from PySide6.QtCore import Qt
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
@@ -74,9 +75,12 @@ class ControlPanel(QWidget):
             exclude_capture(self)
             # 采集排除必须先用本机探针成功验证，不能只依赖Win32返回值。
             from capture_probe import verify_exclusion
-            if not verify_exclusion(self.capture, self.overlay):
-                raise RuntimeError('遮罩实际采集排除验证失败；未启动自动模式，请更换捕获方案')
-            self.overlay.set_masks([], full=True)
+            if self.shield_enabled:
+                if not verify_exclusion(self.capture, self.overlay):
+                    raise RuntimeError('遮罩实际采集排除验证失败；未启动自动模式，请更换捕获方案')
+                self.overlay.set_masks([], full=True)
+            else:
+                self.overlay.hide()
             self.capture.close()
             self.capture=CaptureWorker()
             if self.isVisible():
@@ -101,7 +105,7 @@ class ControlPanel(QWidget):
             self.started = time.monotonic()
             self.last_log_state = None
             self.timer.start()
-            self.status.setText('启动中：初始化本地OCR；未确认安全前临时全屏保护。')
+            self.status.setText('启动中：初始化本地OCR；'+('未确认安全前临时全屏保护。' if self.shield_enabled else '仅检测与提示，不遮蔽屏幕。'))
         except Exception as error:
             self.pause()
             self.status.setText(f'未启动：{error}')
@@ -141,7 +145,7 @@ class ControlPanel(QWidget):
             risk, reason = sensor.risk(now)
             confirmed_risk = not self.integrated or sensor.last is not None or sensor.error is not None
             if risk and confirmed_risk and not self.last_risk and now-self.last_alert_at>=10:
-                self.alert_message = reason+'，已启用隐私遮蔽。'
+                self.alert_message = reason+('，已启用隐私遮蔽。' if self.shield_enabled else '，遮蔽已关闭，请注意屏幕内容。')
                 self.last_alert_at = now
             self.last_risk = risk if confirmed_risk else False
             ocr_ms = None
@@ -183,12 +187,15 @@ class ControlPanel(QWidget):
                              (self.latest is not None and now-self.latest.captured_at>1.5))
             if capture_stale:
                 reason += '；桌面采集未及时更新，临时保护'
-            protecting = self.state.update(now, risk or bool(self.error) or stale or capture_stale)
+            risk_active = self.state.update(now, risk or bool(self.error) or stale or capture_stale)
+            protecting = risk_active and self.shield_enabled
             self.protecting = protecting
             full = protecting and (self.latest is None or self.last_ocr_finished is None or bool(self.error) or stale or capture_stale)
             rectangles = ([rect_of(hit['polygon']) for hit in self.hits]+self.content.pending_rectangles()) if protecting else []
             self.overlay.set_masks(rectangles, full=full, image=self.latest.image if self.latest is not None else None)
             state = '异常全屏保护' if self.error else '临时全屏保护' if full else '敏感行保护' if protecting else '正常显示'
+            if not self.shield_enabled:
+                state = '仅检测与提示（不遮蔽）' + (' · 检测异常' if self.error else ' · 存在风险' if risk_active else '')
             self.status.setText(f'{state} · {reason}\nOCR：'+('异常' if self.error else '已就绪' if self.ready else '加载中'))
             self.detail.setText(f'有效敏感行：{len(self.hits)}；范围：主显示器\n' +
                                 ('实验语义已启用（小样本，需独立评估）' if self.semantic else '规则模式；尚不能覆盖全部私人聊天语义'))
@@ -202,11 +209,12 @@ class ControlPanel(QWidget):
         except Exception as error:
             # 保留可点击的控制面板；异常时不静默恢复内容。
             self.error = self.error or '控制流程异常：'+type(error).__name__
-            self.protecting = True
+            self.protecting = self.shield_enabled
             if self.overlay:
-                self.overlay.set_masks([], full=True)
+                self.overlay.set_masks([], full=self.shield_enabled)
             self.timer.stop()
-            self.status.setText(f'运行异常，已临时全屏保护：{self.error}；可暂停或退出。')
+            effect = '已临时全屏保护' if self.shield_enabled else '遮蔽已关闭'
+            self.status.setText(f'运行异常，{effect}：{self.error}；可暂停或退出。')
             import traceback
             traceback.print_exc()
 

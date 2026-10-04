@@ -106,6 +106,54 @@ class ShellTests(unittest.TestCase):
             toast.assert_called_once()
             application.beep.assert_called_once()
 
+    def test_reminder_choices_are_independent(self):
+        self.panel.has_tray = True
+        for sound in (False, True):
+            for popup in (False, True):
+                self.settings.setValue('sound_enabled', sound)
+                self.settings.setValue('popup_enabled', popup)
+                with patch.object(self.panel.tray, 'showMessage') as toast, patch('app_shell.QApplication.beep') as beep:
+                    self.panel.remind_owner('虚构风险')
+                    self.assertEqual(beep.call_count, int(sound))
+                    self.assertEqual(toast.call_count, int(popup))
+
+    def test_popup_without_tray_is_nonmodal_and_reused(self):
+        self.settings.setValue('sound_enabled', False)
+        self.panel.remind_owner('第一次虚构风险')
+        popup = self.panel.reminder
+        self.assertTrue(popup.isVisible())
+        self.assertFalse(popup.isModal())
+        self.panel.remind_owner('第二次虚构风险')
+        self.assertIs(self.panel.reminder, popup)
+        self.assertEqual(self.panel.reminder_text.text(), '第二次虚构风险')
+        popup.hide()
+
+    def test_effect_settings_persist_and_apply_next_session(self):
+        def save_dialog():
+            dialog = self.app.activeModalWidget()
+            for name in ('shield_enabled', 'sound_enabled', 'popup_enabled'):
+                dialog.findChild(QCheckBox, name).setChecked(False)
+            dialog.accept()
+        QTimer.singleShot(0, save_dialog)
+        self.panel.open_settings()
+        reopened = QSettings(self.path, QSettings.IniFormat)
+        for name in ('shield_enabled', 'sound_enabled', 'popup_enabled'):
+            self.assertFalse(reopened.value(name, True, type=bool))
+        with patch('overlay_window.exclude_capture'):
+            self.panel.toggle_guard()
+        self.assertFalse(self.backend.shield_enabled)
+        self.backend.changed.emit('running', '仅检测')
+        self.assertIn('不遮蔽', self.panel.status.text())
+
+    def test_backend_launch_transmits_shield_choice(self):
+        backend = Backend()
+        backend.shield_enabled = False
+        with patch('process_lifetime.ProcessJob'), patch.object(backend.server, 'listen', return_value=True), patch.object(backend.process, 'start'):
+            backend.start()
+        self.assertEqual(backend.process.processEnvironment().value('VISION_SHIELD_SHIELD_ENABLED'), '0')
+        backend.watchdog.stop()
+        backend.finished(0, QProcess.NormalExit)
+
     def test_malformed_service_status_is_ignored(self):
         backend=Backend();updates=[]
         backend.updated.connect(updates.append)

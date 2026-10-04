@@ -29,6 +29,7 @@ class Backend(QObject):
         self.process.started.connect(self.bind_process)
         self.buffer = b''
         self.stopping = False
+        self.shield_enabled = True
         self.server = QLocalServer(self)
         self.server.newConnection.connect(self.accept_service)
         self.peer = None
@@ -84,6 +85,7 @@ class Backend(QObject):
         # 与multiprocessing的Windows venv启动方式一致，绕过重定向启动器，
         # 使QProcess和Job管理的是实际服务进程，而不是另一层python启动器。
         environment = QProcessEnvironment.systemEnvironment()
+        environment.insert('VISION_SHIELD_SHIELD_ENABLED', '1' if self.shield_enabled else '0')
         if not getattr(sys,'frozen',False) and sys.prefix != sys.base_prefix:
             base = Path(sys._base_executable).with_name('python.exe')
             environment.insert('__PYVENV_LAUNCHER__',executable)
@@ -249,6 +251,8 @@ class Shell(QWidget):
                   'running': ('防护已启用', '暂停防护'), 'stopping': ('正在停止', '停止中…'),
                   'error': ('防护异常', '停止并重试')}
         title, action = labels[state]
+        if state == 'running' and not getattr(self.backend, 'shield_enabled', True):
+            title = '检测与提示已启用（不遮蔽）'
         self.status.setText(title)
         self.toggle.setText(action)
         self.toggle.setEnabled(state not in ('starting', 'stopping'))
@@ -268,6 +272,7 @@ class Shell(QWidget):
             except Exception:
                 self.detail.setText('无法将控制窗口排除出屏幕采集，请检查Windows支持情况。')
                 return
+            self.backend.shield_enabled = self.settings.value('shield_enabled', True, type=bool)
             self.set_state('starting', '正在加载本地防护服务。')
             self.backend.start()
         elif self.state in ('running', 'error'):
@@ -288,9 +293,31 @@ class Shell(QWidget):
             self.set_state('paused')
 
     def remind_owner(self, message):
-        if self.has_tray:
-            self.tray.showMessage('视界盾隐私提醒', message, QSystemTrayIcon.Warning, 4000)
-        QApplication.beep()
+        if self.settings.value('popup_enabled', True, type=bool):
+            if self.has_tray:
+                self.tray.showMessage('视界盾隐私提醒', message, QSystemTrayIcon.Warning, 4000)
+            else:
+                self.show_reminder(message)
+        if self.settings.value('sound_enabled', True, type=bool):
+            QApplication.beep()
+
+    def show_reminder(self, message):
+        # 没有系统托盘时复用单个非模态提示，避免连续通知累积窗口。
+        if not hasattr(self, 'reminder'):
+            self.reminder = QDialog(self, Qt.Tool | Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus)
+            self.reminder.setAttribute(Qt.WA_ShowWithoutActivating)
+            self.reminder.setWindowTitle('视界盾隐私提醒')
+            self.reminder_text = QLabel()
+            self.reminder_text.setWordWrap(True)
+            layout = QVBoxLayout(self.reminder)
+            layout.addWidget(self.reminder_text)
+            self.reminder.resize(320, 100)
+            self.reminder_timer = QTimer(self.reminder)
+            self.reminder_timer.setSingleShot(True)
+            self.reminder_timer.timeout.connect(self.reminder.hide)
+        self.reminder_text.setText(message)
+        self.reminder.show()
+        self.reminder_timer.start(4000)
 
     def show_panel(self):
         self.showNormal()
@@ -305,6 +332,18 @@ class Shell(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle('设置')
         layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel('防护效果（可独立选择）'))
+        effects = {}
+        for key, title in (('shield_enabled', '遮蔽敏感内容'),
+                           ('sound_enabled', '音效提示'), ('popup_enabled', '弹窗提示')):
+            checkbox = QCheckBox(title)
+            checkbox.setObjectName(key)
+            checkbox.setChecked(self.settings.value(key, True, type=bool))
+            effects[key] = checkbox
+            layout.addWidget(checkbox)
+        note = QLabel('遮蔽设置在下次启用防护时生效；提示设置保存后立即生效。\n关闭遮蔽后仍检测风险，但屏幕内容保持可见。')
+        note.setWordWrap(True)
+        layout.addWidget(note)
         auto = QCheckBox('打开软件后自动启用防护')
         hidden = QCheckBox('打开软件后直接驻留托盘')
         auto.setChecked(self.settings.value('auto_enable', False, type=bool))
@@ -312,7 +351,7 @@ class Shell(QWidget):
         hidden.setEnabled(self.has_tray)
         layout.addWidget(auto)
         layout.addWidget(hidden)
-        layout.addWidget(QLabel('设置在下次打开软件时生效。'))
+        layout.addWidget(QLabel('上述启动设置在下次打开软件时生效。'))
         enroll = QPushButton('登记 / 更新机主')
         layout.addWidget(enroll)
         def register():
@@ -330,6 +369,11 @@ class Shell(QWidget):
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         if dialog.exec() == QDialog.Accepted:
+            for key, checkbox in effects.items():
+                self.settings.setValue(key, checkbox.isChecked())
+            if not effects['popup_enabled'].isChecked() and hasattr(self, 'reminder'):
+                self.reminder.hide()
+                self.reminder_timer.stop()
             self.settings.setValue('auto_enable', auto.isChecked())
             self.settings.setValue('start_hidden', hidden.isChecked())
             self.settings.sync()
