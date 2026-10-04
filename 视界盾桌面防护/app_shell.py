@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox,
-                              QHBoxLayout, QLabel, QMenu, QPushButton,
+                              QFrame, QHBoxLayout, QLabel, QMenu, QPushButton,
                               QSystemTrayIcon, QVBoxLayout, QWidget)
 
 
@@ -159,7 +159,7 @@ def shield_icon():
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
     painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor('#12856f'))
+    painter.setBrush(QColor('#345f86'))
     path = QPainterPath()
     path.moveTo(24, 3)
     path.lineTo(41, 10)
@@ -176,6 +176,14 @@ def shield_icon():
     return QIcon(pixmap)
 
 
+def separator():
+    line = QFrame()
+    line.setFrameShape(QFrame.HLine)
+    line.setObjectName('separator')
+    line.setFixedHeight(1)
+    return line
+
+
 class Shell(QWidget):
     def __init__(self, settings=None, backend=None, preview=False, tray_available=None):
         super().__init__()
@@ -185,45 +193,72 @@ class Shell(QWidget):
         self.setWindowTitle('视界盾')
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         self.setWindowIcon(shield_icon())
-        self.setFixedSize(420, 340)
+        self.setMinimumSize(440, 400)
+        self.resize(440, 400)
         self.setStyleSheet('''
-            QWidget { background: #f5f7f8; color: #23312e; font: 10pt "Microsoft YaHei UI"; }
-            QLabel#title { font-size: 23px; font-weight: 600; }
-            QLabel#caption { color: #6d7b77; }
-            QLabel#state { font-size: 18px; font-weight: 600; }
-            QLabel#detail { color: #66746f; }
-            QPushButton { border: 1px solid #d6e0dd; border-radius: 8px; padding: 9px 16px; background: white; }
-            QPushButton:hover { background: #eaf2ef; }
-            QPushButton#primary { background: #12856f; border: none; color: white; font-weight: 600; }
-            QPushButton#primary:hover { background: #0d715e; }
-            QPushButton:disabled { background: #dce5e2; color: #74817d; }
+            QWidget { background: #fafafa; color: #20252b; font: 10pt "Microsoft YaHei UI"; }
+            QLabel { background: transparent; }
+            QLabel#title { font-size: 20px; font-weight: 600; }
+            QLabel#caption, QLabel#detail, QLabel#optionDescription { color: #737b86; }
+            QLabel#state { font-size: 24px; font-weight: 600; }
+            QLabel#section { font-size: 17px; font-weight: 600; }
+            QLabel#optionTitle { font-size: 14px; }
+            QFrame#separator { background: #e1e4e8; border: none; }
+            QPushButton { border: 1px solid #c9ced5; border-radius: 4px; padding: 8px 15px; background: #f7f8fa; }
+            QPushButton:hover { background: #eef1f5; border-color: #9ca8b5; }
+            QPushButton:pressed { background: #e3e8ee; }
+            QPushButton:focus { border: 2px solid #345f86; padding: 7px 14px; }
+            QPushButton#primary, QPushButton#save { background: #345f86; border-color: #345f86; color: white; font-weight: 600; }
+            QPushButton#primary:hover, QPushButton#save:hover { background: #2b5275; }
+            QPushButton:disabled { background: #e4e7eb; border-color: #d7dce2; color: #858e99; }
+            QCheckBox { spacing: 10px; }
+            QCheckBox:disabled { color: #9299a2; }
         ''')
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(28, 24, 28, 24)
-        layout.setSpacing(10)
-        title, caption = QLabel('视界盾'), QLabel('公共场景下的屏幕隐私防护')
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
+        title, caption = QLabel('视界盾'), QLabel('VisionShield')
         title.setObjectName('title')
         caption.setObjectName('caption')
         self.status, self.detail = QLabel(), QLabel()
         self.status.setObjectName('state')
+        self.status.setWordWrap(True)
         self.detail.setObjectName('detail')
         self.detail.setWordWrap(True)
-        self.detail.setMinimumHeight(58)
+        self.detail.setAlignment(Qt.AlignCenter)
+        self.detail.setMinimumHeight(64)
+        self.status_dot = QLabel('●')
+        self.status_dot.setFixedWidth(22)
+        self.status_dot.setAlignment(Qt.AlignCenter)
         self.toggle = QPushButton()
         self.toggle.setObjectName('primary')
+        self.toggle.setMinimumHeight(44)
         self.toggle.clicked.connect(self.toggle_guard)
         actions = QHBoxLayout()
         settings_button, hide_button = QPushButton('设置'), QPushButton('后台运行')
         settings_button.clicked.connect(self.open_settings)
         hide_button.clicked.connect(self.hide)
+        footer = QLabel('本地处理 · 主显示器')
+        footer.setObjectName('caption')
+        actions.addWidget(footer)
+        actions.addStretch()
         actions.addWidget(settings_button)
         actions.addWidget(hide_button)
         layout.addWidget(title)
         layout.addWidget(caption)
-        layout.addSpacing(12)
-        for widget in (self.status, self.detail, self.toggle):
-            layout.addWidget(widget)
+        layout.addWidget(separator())
         layout.addStretch()
+        state_row = QHBoxLayout()
+        state_row.setSpacing(8)
+        state_row.addStretch()
+        state_row.addWidget(self.status_dot)
+        state_row.addWidget(self.status)
+        state_row.addStretch()
+        layout.addLayout(state_row)
+        layout.addWidget(self.detail)
+        layout.addStretch()
+        layout.addWidget(self.toggle)
+        layout.addWidget(separator())
         layout.addLayout(actions)
         self.tray = QSystemTrayIcon(self.windowIcon(), self)
         menu = QMenu(self)
@@ -254,6 +289,9 @@ class Shell(QWidget):
         if state == 'running' and not getattr(self.backend, 'shield_enabled', True):
             title = '检测与提示已启用（不遮蔽）'
         self.status.setText(title)
+        dot_color = {'running': '#345f86', 'error': '#a04a40', 'starting': '#a8843e',
+                     'stopping': '#a8843e', 'paused': '#969da6'}[state]
+        self.status_dot.setStyleSheet(f'color: {dot_color}; font-size: 18px;')
         self.toggle.setText(action)
         self.toggle.setEnabled(state not in ('starting', 'stopping'))
         self.tray_toggle.setText(action)
@@ -331,19 +369,52 @@ class Shell(QWidget):
     def open_settings(self):
         dialog = QDialog(self)
         dialog.setWindowTitle('设置')
+        dialog.setMinimumWidth(460)
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel('防护效果（可独立选择）'))
+        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(14)
+        heading = QLabel('防护效果')
+        heading.setObjectName('section')
+        layout.addWidget(heading)
+        caption = QLabel('可独立选择，组合使用')
+        caption.setObjectName('caption')
+        layout.addWidget(caption)
         effects = {}
-        for key, title in (('shield_enabled', '遮蔽敏感内容'),
-                           ('sound_enabled', '音效提示'), ('popup_enabled', '弹窗提示')):
-            checkbox = QCheckBox(title)
+        for index, (key, title, description) in enumerate((
+                ('shield_enabled', '遮蔽敏感内容', '旁观风险出现时，遮蔽敏感行与待分析区域。'),
+                ('sound_enabled', '音效提示', '检测到旁观风险时播放系统提示音。'),
+                ('popup_enabled', '弹窗提示', '检测到旁观风险时显示隐私提醒。'))):
+            row = QHBoxLayout()
+            row.setSpacing(16)
+            text = QVBoxLayout()
+            text.setSpacing(5)
+            label = QLabel(title)
+            label.setObjectName('optionTitle')
+            explanation = QLabel(description)
+            explanation.setObjectName('optionDescription')
+            explanation.setWordWrap(True)
+            text.addWidget(label)
+            text.addWidget(explanation)
+            checkbox = QCheckBox()
             checkbox.setObjectName(key)
+            checkbox.setAccessibleName(title)
+            label.setBuddy(checkbox)
+            checkbox.setMinimumSize(28, 28)
             checkbox.setChecked(self.settings.value(key, True, type=bool))
             effects[key] = checkbox
-            layout.addWidget(checkbox)
+            row.addLayout(text, 1)
+            row.addWidget(checkbox, 0, Qt.AlignTop)
+            layout.addLayout(row)
+            if index < 2:
+                layout.addWidget(separator())
         note = QLabel('遮蔽设置在下次启用防护时生效；提示设置保存后立即生效。\n关闭遮蔽后仍检测风险，但屏幕内容保持可见。')
+        note.setObjectName('caption')
         note.setWordWrap(True)
         layout.addWidget(note)
+        layout.addWidget(separator())
+        startup_heading = QLabel('启动偏好')
+        startup_heading.setObjectName('section')
+        layout.addWidget(startup_heading)
         auto = QCheckBox('打开软件后自动启用防护')
         hidden = QCheckBox('打开软件后直接驻留托盘')
         auto.setChecked(self.settings.value('auto_enable', False, type=bool))
@@ -351,9 +422,11 @@ class Shell(QWidget):
         hidden.setEnabled(self.has_tray)
         layout.addWidget(auto)
         layout.addWidget(hidden)
-        layout.addWidget(QLabel('上述启动设置在下次打开软件时生效。'))
+        startup_note = QLabel('上述启动设置在下次打开软件时生效。')
+        startup_note.setObjectName('caption')
+        layout.addWidget(startup_note)
+        layout.addWidget(separator())
         enroll = QPushButton('登记 / 更新机主')
-        layout.addWidget(enroll)
         def register():
             if self.state != 'paused':
                 self.detail.setText('请先暂停防护，再登记机主。')
@@ -363,11 +436,17 @@ class Shell(QWidget):
             self.register_owner()
         enroll.clicked.connect(register)
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.setLayoutDirection(Qt.RightToLeft)
         buttons.button(QDialogButtonBox.Save).setText('保存')
+        buttons.button(QDialogButtonBox.Save).setObjectName('save')
         buttons.button(QDialogButtonBox.Cancel).setText('取消')
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
+        footer = QHBoxLayout()
+        footer.addWidget(enroll)
+        footer.addStretch()
+        footer.addWidget(buttons)
+        layout.addLayout(footer)
         if dialog.exec() == QDialog.Accepted:
             for key, checkbox in effects.items():
                 self.settings.setValue(key, checkbox.isChecked())
