@@ -54,6 +54,7 @@ class Backend(QObject):
 
     def accept_service(self):
         self.peer = self.server.nextPendingConnection()
+        self.peer.readyRead.connect(self.read_peer_status)
         if self.stopping:
             self.peer.write(b'stop')
             self.peer.flush()
@@ -105,7 +106,14 @@ class Backend(QObject):
             self.watchdog.start(15000)
 
     def read_status(self):
-        self.buffer += bytes(self.process.readAllStandardOutput())
+        self.consume_status(bytes(self.process.readAllStandardOutput()))
+
+    def read_peer_status(self):
+        if self.peer is not None:
+            self.consume_status(bytes(self.peer.readAll()))
+
+    def consume_status(self, data):
+        self.buffer += data
         if len(self.buffer) > 65536:
             self.buffer = self.buffer[-65536:]
         while b'\n' in self.buffer:

@@ -99,7 +99,7 @@ class ControlSafetyTests(unittest.TestCase):
         with patch('desktop_guard.ScreenCapture', return_value=capture), \
                 patch('desktop_guard.CaptureWorker'), patch('desktop_guard.OCRWorker'), \
                 patch('camera_worker.CameraWorker'), patch('desktop_guard.OverlayWindow') as overlay, \
-                patch('desktop_guard.Path.open'), patch('capture_probe.verify_exclusion') as probe, \
+                patch('pathlib.Path.open'), patch('capture_probe.verify_exclusion') as probe, \
                 patch('desktop_guard.exclude_capture'):
             self.panel.start()
         probe.assert_not_called()

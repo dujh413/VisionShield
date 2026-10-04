@@ -7,7 +7,9 @@ if __name__ == '__main__':
     multiprocessing.freeze_support()
     sys.path.insert(0, str(Path(__file__).resolve().parent/'视界盾桌面防护'))
     try:
-        if '--backend-service' in sys.argv:
+        if '--package-check' in sys.argv:
+            from package_check import main
+        elif '--backend-service' in sys.argv:
             from guard_service import main
         else:
             from app_shell import main
