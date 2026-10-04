@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 import uuid
 
-from PySide6.QtCore import QObject, QProcess, QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox,
@@ -26,11 +26,30 @@ class Backend(QObject):
         self.process.readyReadStandardError.connect(self.discard_errors)
         self.process.finished.connect(self.finished)
         self.process.errorOccurred.connect(self.failed)
+        self.process.started.connect(self.bind_process)
         self.buffer = b''
         self.stopping = False
         self.server = QLocalServer(self)
         self.server.newConnection.connect(self.accept_service)
         self.peer = None
+        self.job = None
+        self.failure_detail = None
+        self.watchdog = QTimer(self)
+        self.watchdog.setSingleShot(True)
+        self.watchdog.timeout.connect(self.timed_out)
+
+    def bind_process(self):
+        try:
+            self.job.attach(int(self.process.processId()))
+        except OSError:
+            self.failure_detail = '无法管理防护进程资源，服务已停止。'
+            self.process.kill()
+
+    def timed_out(self):
+        self.failure_detail = '防护服务停止超时，已释放后台资源。' if self.stopping else '防护服务启动超时，请检查运行环境。'
+        if self.job is not None:
+            self.job.close()
+        self.process.kill()
 
     def accept_service(self):
         self.peer = self.server.nextPendingConnection()
@@ -39,10 +58,21 @@ class Backend(QObject):
             self.peer.flush()
 
     def start(self):
+        if self.process.state() != QProcess.NotRunning:
+            return
         self.stopping = False
         self.buffer = b''
+        self.failure_detail = None
+        from process_lifetime import ProcessJob
+        try:
+            self.job = ProcessJob()
+        except OSError:
+            self.changed.emit('error', '无法初始化防护进程资源管理。')
+            self.stopped.emit()
+            return
         name = 'VisionShield.Service.'+uuid.uuid4().hex
         if not self.server.listen(name):
+            self.job.close()
             self.changed.emit('error', '无法建立本机防护服务连接。')
             self.stopped.emit()
             return
@@ -51,6 +81,15 @@ class Backend(QObject):
         executable = sys.executable
         if not getattr(sys,'frozen',False) and Path(executable).name.lower()=='pythonw.exe':
             executable = str(Path(executable).with_name('python.exe'))
+        # 与multiprocessing的Windows venv启动方式一致，绕过重定向启动器，
+        # 使QProcess和Job管理的是实际服务进程，而不是另一层python启动器。
+        environment = QProcessEnvironment.systemEnvironment()
+        if not getattr(sys,'frozen',False) and sys.prefix != sys.base_prefix:
+            base = Path(sys._base_executable).with_name('python.exe')
+            environment.insert('__PYVENV_LAUNCHER__',executable)
+            executable = str(base)
+        self.process.setProcessEnvironment(environment)
+        self.watchdog.start(30000)
         self.process.start(executable, arguments)
 
     def stop(self):
@@ -60,6 +99,8 @@ class Backend(QObject):
         elif self.peer is not None:
             self.peer.write(b'stop')
             self.peer.flush()
+        if self.process.state() != QProcess.NotRunning:
+            self.watchdog.start(15000)
 
     def read_status(self):
         self.buffer += bytes(self.process.readAllStandardOutput())
@@ -73,7 +114,11 @@ class Backend(QObject):
                 value = json.loads(line[len(b'VISION_SHIELD:'):])
             except (ValueError, UnicodeError):
                 continue
+            if (not isinstance(value, dict) or value.get('state') not in ('running','error')
+                    or not isinstance(value.get('detail'),str)):
+                continue
             if not self.stopping:
+                self.watchdog.stop()
                 self.updated.emit(value)
                 self.changed.emit(value['state'], value['detail'])
                 if value.get('alert'):
@@ -84,18 +129,25 @@ class Backend(QObject):
 
     def failed(self, error):
         if error == QProcess.FailedToStart:
+            self.watchdog.stop()
+            if self.job is not None:
+                self.job.close()
             self.server.close()
             self.changed.emit('error', '防护服务未能启动，请检查运行环境。')
             self.stopped.emit()
 
     def finished(self, exit_code, exit_status):
+        self.watchdog.stop()
+        if self.job is not None:
+            self.job.close()
+            self.job = None
         if self.peer is not None:
             self.peer.disconnectFromServer()
             self.peer.deleteLater()
             self.peer = None
         self.server.close()
         if not self.stopping:
-            self.changed.emit('error', '防护服务已退出，请重新启用。')
+            self.changed.emit('error', self.failure_detail or '防护服务已退出，请重新启用。')
         self.stopped.emit()
 
 
@@ -268,7 +320,7 @@ class Shell(QWidget):
                 self.detail.setText('请先暂停防护，再登记机主。')
                 dialog.reject()
                 return
-            dialog.accept()
+            dialog.reject()
             self.register_owner()
         enroll.clicked.connect(register)
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
@@ -288,7 +340,10 @@ class Shell(QWidget):
             self.detail.setText('预览模式不打开摄像头。')
             return
         from owner_enrollment import EnrollmentDialog
-        EnrollmentDialog(self).exec()
+        try:
+            EnrollmentDialog(self).exec()
+        except Exception:
+            self.detail.setText('机主登记无法启动，请检查运行环境后重试。')
 
     def quit_app(self):
         self.quitting = True

@@ -55,13 +55,13 @@ class ControlPanel(QWidget):
         self.ready = False
         self.semantic = None
         if semantic:
-            from semantic_classifier import SemanticClassifier
-            self.semantic = SemanticClassifier(self.root/'data/semantic_samples.json')
+            raise ValueError('实验语义分类模块尚未交付，请使用默认规则模式')
         self.log = self.writer = None
         self.last_log_state = None
 
     def start(self):
-        self.pause()
+        if not self.pause():
+            return
         try:
             self.capture = ScreenCapture()
             screen = QApplication.primaryScreen()
@@ -108,18 +108,30 @@ class ControlPanel(QWidget):
 
     def pause(self):
         self.timer.stop()
+        failures = []
         for name in ('overlay', 'capture', 'worker', 'camera', 'bridge'):
             obj = getattr(self, name, None)
             if obj is not None:
-                obj.close()
-                setattr(self, name, None)
+                try:
+                    obj.close()
+                    setattr(self, name, None)
+                except Exception as error:
+                    failures.append(name+':'+type(error).__name__)
         if self.log:
-            self.log.close()
-            self.log = self.writer = None
+            try:
+                self.log.close()
+                self.log = self.writer = None
+            except Exception as error:
+                failures.append('log:'+type(error).__name__)
         self.latest = self.valid_image = None
         self.hits = []
         self.content = ContentIndex()
-        self.status.setText('已暂停：当前桌面不受本软件保护。')
+        self.ready = False
+        self.last_ocr_finished = None
+        self.protecting = self.overlay is not None
+        self.error = '资源清理未完成：'+', '.join(failures) if failures else None
+        self.status.setText(self.error or '已暂停：当前桌面不受本软件保护。')
+        return not failures
 
     def tick(self):
         try:
@@ -137,6 +149,14 @@ class ControlPanel(QWidget):
                 frame = self.capture.latest()
                 self.last_capture = now
                 if frame is not None:
+                    screen = QApplication.primaryScreen()
+                    geometry = screen.geometry()
+                    self.overlay.setGeometry(geometry)
+                    ratio = screen.devicePixelRatio()
+                    if (abs(geometry.width()*ratio-frame.image.shape[1])>2 or
+                            abs(geometry.height()*ratio-frame.image.shape[0])>2):
+                        self.error = '显示器尺寸已变化，请暂停后重新启用防护'
+                        raise RuntimeError(self.error)
                     self.latest = frame
                     self.content.update(frame.image)
                     # 未有有效OCR时持续提交最新帧；队列最大1。
@@ -159,9 +179,13 @@ class ControlPanel(QWidget):
             if stale:
                 # 持续动画或OCR过慢时不将陈旧结果当作有效坐标。
                 reason += '；OCR结果未及时更新，临时保护'
-            protecting = self.state.update(now, risk or bool(self.error))
+            capture_stale = ((self.latest is None and now-self.started>1.5) or
+                             (self.latest is not None and now-self.latest.captured_at>1.5))
+            if capture_stale:
+                reason += '；桌面采集未及时更新，临时保护'
+            protecting = self.state.update(now, risk or bool(self.error) or stale or capture_stale)
             self.protecting = protecting
-            full = protecting and (self.latest is None or self.last_ocr_finished is None or bool(self.error) or stale)
+            full = protecting and (self.latest is None or self.last_ocr_finished is None or bool(self.error) or stale or capture_stale)
             rectangles = ([rect_of(hit['polygon']) for hit in self.hits]+self.content.pending_rectangles()) if protecting else []
             self.overlay.set_masks(rectangles, full=full, image=self.latest.image if self.latest is not None else None)
             state = '异常全屏保护' if self.error else '临时全屏保护' if full else '敏感行保护' if protecting else '正常显示'
@@ -177,12 +201,12 @@ class ControlPanel(QWidget):
                 self.last_log_state = summary
         except Exception as error:
             # 保留可点击的控制面板；异常时不静默恢复内容。
-            self.error = '控制流程异常：'+type(error).__name__
+            self.error = self.error or '控制流程异常：'+type(error).__name__
             self.protecting = True
             if self.overlay:
                 self.overlay.set_masks([], full=True)
             self.timer.stop()
-            self.status.setText(f'运行异常，已临时全屏保护：{type(error).__name__}；可暂停或退出。')
+            self.status.setText(f'运行异常，已临时全屏保护：{self.error}；可暂停或退出。')
             import traceback
             traceback.print_exc()
 
@@ -196,6 +220,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--semantic', action='store_true', help='启用小样本实验语义分类')
     args = parser.parse_args()
+    if args.semantic:
+        parser.error('实验语义分类模块尚未交付，请移除--semantic使用规则模式')
     enable_dpi()
     app = QApplication(sys.argv[:1])
     panel = ControlPanel(args.semantic)

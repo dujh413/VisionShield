@@ -6,9 +6,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
-from PySide6.QtCore import QObject, QSettings, QTimer, Signal
-from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QDialogButtonBox
+from unittest.mock import Mock, patch
+from PySide6.QtCore import QObject, QProcess, QSettings, QTimer, Signal
+from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QDialogButtonBox, QPushButton
 from app_shell import Shell, Backend
 
 
@@ -106,6 +106,36 @@ class ShellTests(unittest.TestCase):
             toast.assert_called_once()
             application.beep.assert_called_once()
 
+    def test_malformed_service_status_is_ignored(self):
+        backend=Backend();updates=[]
+        backend.updated.connect(updates.append)
+        for data in ([],None,{}, {'state':'unknown','detail':'x'}, {'state':'running','detail':None}):
+            encoded=('VISION_SHIELD:'+json.dumps(data)+'\n').encode()
+            with patch.object(backend.process,'readAllStandardOutput',return_value=encoded):
+                backend.read_status()
+        self.assertFalse(updates)
+
+    def test_service_timeout_kills_process_tree(self):
+        backend=Backend();backend.job=Mock()
+        with patch.object(backend.process,'kill') as kill:
+            backend.timed_out()
+            backend.job.close.assert_called_once()
+            kill.assert_called_once()
+        self.assertIn('启动超时',backend.failure_detail)
+
+    def test_stop_before_service_connects_has_timeout(self):
+        backend=Backend()
+        with patch.object(backend.process,'state',return_value=QProcess.Starting):
+            backend.stop()
+        self.assertTrue(backend.watchdog.isActive())
+        backend.watchdog.stop()
+
+    def test_finished_closes_job_even_after_unexpected_exit(self):
+        backend=Backend();job=Mock();backend.job=job
+        backend.finished(1,QProcess.CrashExit)
+        job.close.assert_called_once()
+        self.assertIsNone(backend.job)
+
     def test_close_hides_without_stopping_when_tray_exists(self):
         self.panel.has_tray = True
         self.panel.show()
@@ -142,6 +172,20 @@ class ShellTests(unittest.TestCase):
         self.panel.open_settings()
         reopened.sync()
         self.assertTrue(reopened.value('auto_enable', False, type=bool))
+
+    def test_registration_does_not_silently_save_settings(self):
+        def register_dialog():
+            dialog=self.app.activeModalWidget()
+            for checkbox in dialog.findChildren(QCheckBox):
+                checkbox.setChecked(True)
+            for button in dialog.findChildren(QPushButton):
+                if button.text()=='登记 / 更新机主':
+                    button.click();break
+        QTimer.singleShot(0,register_dialog)
+        with patch.object(self.panel,'register_owner') as register:
+            self.panel.open_settings()
+            register.assert_called_once()
+        self.assertFalse(self.settings.value('auto_enable',False,type=bool))
 
 
 if __name__ == '__main__':

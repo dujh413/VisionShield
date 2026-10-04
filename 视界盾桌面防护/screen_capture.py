@@ -79,6 +79,8 @@ class CaptureWorker:
     def close(self):
         self.stop.set()
         self.thread.join(timeout=2)
+        if self.thread.is_alive():
+            raise TimeoutError('桌面采集线程未停止')
         try: self.frames.get_nowait()
         except queue.Empty: pass
 
