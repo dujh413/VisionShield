@@ -27,12 +27,17 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setGeometry(screen.geometry())
+        screen.geometryChanged.connect(self.screen_geometry_changed)
         self.rectangles = []
         self.full = False
         self.blurs = []
         self.mask_image = None
         self.show()
         exclude_capture(self)
+
+    def screen_geometry_changed(self,geometry):
+        self.setGeometry(geometry)
+        self.set_masks([],full=True)
 
     def set_masks(self, rectangles, full=False, image=None):
         if self.mask_image is image and self.rectangles == rectangles and self.full == full:

@@ -14,27 +14,24 @@ def settle():
 def verify_exclusion(capture, overlay):
     background = QWidget()
     background.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+    background.setAttribute(Qt.WA_ShowWithoutActivating)
     background.setStyleSheet('background-color: rgb(0,255,255);')
     screen = QApplication.primaryScreen()
     geo = screen.geometry()
     background.setGeometry(geo.x()+80, geo.y()+300, 240, 120)
     try:
-        overlay.set_masks([], full=False)
+        # 启动校验期间持续整屏保护，不能为了截图探针暂时显示敏感桌面。
+        overlay.set_masks([], full=True)
         background.show()
-        background.raise_()
+        overlay.raise_()
         settle()
         ratio = screen.devicePixelRatio()
         x, y = int(160*ratio), int(350*ratio)
         before = capture.grab().image[y:y+10, x:x+10]
         if before.shape != (10,10,3) or not np.all(before == [255,255,0]):
             return False
-        overlay.set_masks([(80*ratio,300*ratio,240*ratio,120*ratio)])
-        overlay.raise_()
-        settle()
-        after = capture.grab().image[y:y+10, x:x+10]
-        return np.array_equal(before, after)
+        return True
     finally:
-        overlay.set_masks([], full=False)
         background.close()
 
 

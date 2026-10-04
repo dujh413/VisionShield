@@ -75,8 +75,8 @@ def recognize(ocr, image, preserve_scale=False):
               'polygon': polygon.tolist() if hasattr(polygon, 'tolist') else polygon}
              for text, score, polygon in zip(texts, scores, polygons)]
     # 未被识别输出覆盖的检测框也不能直接当安全。
-    if not lines:
-        for polygon in result.get('dt_polys', []):
+    for polygon in result.get('dt_polys', []):
+        if not any(np.array_equal(polygon,line['polygon']) for line in lines):
             lines.append({'text': '', 'confidence': 0.0,
                           'polygon': polygon.tolist() if hasattr(polygon, 'tolist') else polygon})
     return lines

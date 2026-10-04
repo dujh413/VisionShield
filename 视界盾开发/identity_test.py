@@ -48,7 +48,10 @@ def extract(frame, face, recognizer):
     if cv2.Laplacian(gray, cv2.CV_64F).var() < 60 or not 40 <= gray.mean() <= 220:
         return None
     feature = recognizer.feature(crop).reshape(-1)
-    return feature / max(float(np.linalg.norm(feature)), 1e-9)
+    norm = float(np.linalg.norm(feature))
+    if not np.isfinite(feature).all() or not np.isfinite(norm) or norm<1e-9:
+        return None
+    return feature / norm
 
 
 def main():
