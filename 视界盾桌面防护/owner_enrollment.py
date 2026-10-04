@@ -1,9 +1,9 @@
 """仅在本人打开登记窗口并点击登记后采集模板；预览和样本不保存图像。"""
 import multiprocessing as mp
-from pathlib import Path
 import queue
 import sys
 import time
+from runtime_paths import camera_root, owner_file
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QDialog, QLabel, QPushButton, QVBoxLayout
@@ -60,9 +60,9 @@ def enroll_main(root, stop, enroll, output):
                     if len(samples)>=12:
                         if stop.is_set():
                             return
-                        folder=root/'private'
-                        folder.mkdir(exist_ok=True)
-                        target=folder/'owner_templates.npz'
+                        target=owner_file(root)
+                        folder=target.parent
+                        folder.mkdir(parents=True, exist_ok=True)
                         temporary=folder/'owner_templates.pending.npz'
                         np.savez_compressed(temporary,features=np.stack(samples))
                         temporary.replace(target)
@@ -102,7 +102,7 @@ class EnrollmentDialog(QDialog):
         layout.addWidget(self.preview);layout.addWidget(self.status);layout.addWidget(self.begin)
         ctx=mp.get_context('spawn')
         self.stop,self.enroll,self.output=ctx.Event(),ctx.Event(),ctx.Queue(2)
-        root=Path(__file__).resolve().parents[1]/'视界盾开发'
+        root=camera_root()
         self.process=ctx.Process(target=enroll_main,args=(root,self.stop,self.enroll,self.output),daemon=True)
         from process_lifetime import ProcessJob
         self.job=None

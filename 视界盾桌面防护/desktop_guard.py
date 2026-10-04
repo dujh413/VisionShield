@@ -2,7 +2,6 @@ import argparse
 import csv
 from datetime import datetime
 import multiprocessing
-from pathlib import Path
 import sys
 import time
 
@@ -16,6 +15,7 @@ from ocr_worker import OCRWorker
 from overlay_window import OverlayWindow, exclude_capture
 from protection_state import ProtectionState
 from content_index import ContentIndex
+from runtime_paths import desktop_root, records_directory
 
 
 class ControlPanel(QWidget):
@@ -49,7 +49,7 @@ class ControlPanel(QWidget):
         self.timer = QTimer(self)
         self.timer.setInterval(20)
         self.timer.timeout.connect(self.tick)
-        self.root = Path(__file__).resolve().parent
+        self.root = desktop_root()
         self.latest = self.valid_image = None
         self.hits, self.last_capture = [], 0
         self.error = None
@@ -97,8 +97,8 @@ class ControlPanel(QWidget):
             self.error, self.ready = None, False
             self.content = ContentIndex()
             self.last_risk, self.alert_message, self.last_ocr_finished = False, None, None
-            records = self.root/'records'
-            records.mkdir(exist_ok=True)
+            records = records_directory()
+            records.mkdir(parents=True, exist_ok=True)
             self.log = (records/f"guard_{datetime.now():%Y%m%d_%H%M%S_%f}.csv").open('w', encoding='utf-8-sig', newline='')
             self.writer = csv.writer(self.log)
             self.writer.writerow(['elapsed_s','state','frame_id','sensitive_lines','categories','ocr_ms'])
