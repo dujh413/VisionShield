@@ -33,7 +33,9 @@ def main():
     enable_dpi()
     app = QApplication([])
     app.setQuitOnLastWindowClosed(False)
-    panel = ControlPanel(integrated=True, shield_enabled=os.environ.get('VISION_SHIELD_SHIELD_ENABLED', '1') != '0')
+    panel = ControlPanel(integrated=True, shield_enabled=os.environ.get('VISION_SHIELD_SHIELD_ENABLED', '1') != '0',
+                         effect_text=os.environ.get('VISION_SHIELD_EFFECT_TEXT', '遮挡')[:128],
+                         diagnostics=os.environ.get('VISION_SHIELD_DIAGNOSTICS') == '1')
     socket = QLocalSocket()
     socket.connectToServer(sys.argv[-1])
     if not socket.waitForConnected(3000):

@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox,
-                              QFrame, QHBoxLayout, QLabel, QMenu, QPushButton,
+                              QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
                               QSystemTrayIcon, QVBoxLayout, QWidget)
 
 
@@ -30,6 +30,7 @@ class Backend(QObject):
         self.buffer = b''
         self.stopping = False
         self.shield_enabled = True
+        self.effect_text = ""
         self.server = QLocalServer(self)
         self.server.newConnection.connect(self.accept_service)
         self.peer = None
@@ -66,7 +67,7 @@ class Backend(QObject):
 
     def send_preferences(self):
         if self.peer is not None and not self.stopping:
-            packet = {'shield_enabled':self.shield_enabled, 'app_profiles':self.app_profiles}
+            packet = {'shield_enabled':self.shield_enabled, 'app_profiles':self.app_profiles, 'effect_text':self.effect_text}
             self.peer.write((json.dumps(packet, ensure_ascii=True)+'\n').encode())
             self.peer.flush()
 
@@ -98,6 +99,7 @@ class Backend(QObject):
         # 使QProcess和Job管理的是实际服务进程，而不是另一层python启动器。
         environment = QProcessEnvironment.systemEnvironment()
         environment.insert('VISION_SHIELD_SHIELD_ENABLED', '1' if self.shield_enabled else '0')
+        environment.insert('VISION_SHIELD_EFFECT_TEXT', self.effect_text)
         if not getattr(sys,'frozen',False) and sys.prefix != sys.base_prefix:
             base = Path(sys._base_executable).with_name('python.exe')
             environment.insert('__PYVENV_LAUNCHER__',executable)
@@ -286,6 +288,12 @@ class Shell(QWidget):
             check.toggled.connect(lambda value, name=key: self.change_effect(name, value))
             self.effect_checks[key] = check
             layout.addWidget(check)
+        self.effect_input = QLineEdit(str(self.settings.value('effect_text', '')))
+        self.effect_input.setMaxLength(128)
+        self.effect_input.setAccessibleName('敏感内容处理设置')
+        self.effect_input.setPlaceholderText('整数：模糊半径；留空：不处理；其他字符：深色遮挡')
+        layout.addWidget(QLabel('敏感内容处理设置（启用时生效）'))
+        layout.addWidget(self.effect_input)
         layout.addWidget(self.toggle)
         layout.addWidget(separator())
         layout.addLayout(actions)
@@ -337,7 +345,9 @@ class Shell(QWidget):
                   'running': ('防护已启用', '暂停防护'), 'stopping': ('正在停止', '停止中…'),
                   'error': ('防护异常', '停止并重试')}
         title, action = labels[state]
-        if state == 'running' and not getattr(self.backend, 'shield_enabled', True):
+        committed = getattr(self.backend, 'effect_text', None)
+        mode_off = isinstance(committed, str) and not committed.strip()
+        if state == 'running' and (not getattr(self.backend, 'shield_enabled', True) or mode_off):
             title = '检测与提示已启用（不遮蔽）'
         self.status.setText(title)
         dot_color = {'running': '#345f86', 'error': '#a04a40', 'starting': '#a8843e',
@@ -363,6 +373,9 @@ class Shell(QWidget):
                 return
             self.backend.shield_enabled = self.settings.value('shield_enabled', True, type=bool)
             self.backend.app_profiles = self.load_profiles()
+            self.backend.effect_text = self.effect_input.text()
+            self.settings.setValue('effect_text', self.backend.effect_text)
+            self.settings.sync()
             self.set_state('starting', '正在加载本地防护服务。')
             self.backend.start()
         elif self.state in ('running', 'error'):
@@ -591,7 +604,11 @@ class Shell(QWidget):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--preview', action='store_true', help='仅预览界面，不加载防护后端')
+    parser.add_argument('--diagnostics', action='store_true', help='记录匿名阶段耗时与心跳')
     args = parser.parse_args()
+    if args.diagnostics:
+        import os
+        os.environ['VISION_SHIELD_DIAGNOSTICS'] = '1'
     app = QApplication(sys.argv[:1])
     app.setQuitOnLastWindowClosed(False)
     name = 'VisionShield.Desktop.'+('Preview' if args.preview else 'Main')

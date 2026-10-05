@@ -3,9 +3,9 @@ import onnxruntime as ort
 import cv2
 import numpy as np
 import time
+from runtime_paths import desktop_root
 from gpu_adapter import preferred_adapter
 from rapidocr_onnxruntime import RapidOCR
-from runtime_paths import desktop_root
 
 
 class FastOCR:
@@ -71,6 +71,8 @@ class FastOCR:
 
     def recognize(self,image,preserve_scale=False):
         started=time.perf_counter()
+        self.last_timing = {'preprocess_ms': 0.0, 'detection_ms': 0.0, 'crop_ms': 0.0,
+                            'recognition_ms': 0.0}
         height,width=image.shape[:2]
         bucket=next(((w,h) for w,h in self.buckets if width<=w and height<=h),self.buckets[-1])
         bw,bh=bucket
@@ -79,8 +81,11 @@ class FastOCR:
         canvas=np.empty((bh,bw,3),dtype=np.uint8)
         canvas[:]=image[0,0]
         canvas[:rh,:rw]=cv2.resize(image,(rw,rh)) if scale<1 else image
+        preprocessed=time.perf_counter()
         boxes,_=self.engine.text_det(canvas)
         detected=time.perf_counter()
+        self.last_timing['preprocess_ms']=(preprocessed-started)*1000
+        self.last_timing['detection_ms']=(detected-preprocessed)*1000
         if boxes is None:
             return []
         mapped=[]
@@ -97,8 +102,9 @@ class FastOCR:
         mapped=self.engine.sorted_boxes(np.asarray(mapped))
         # 识别裁剪取原始分辨率，检测缩放不降低识别输入文字的清晰度。
         crops=self.engine.get_crop_img_list(image,mapped)
+        cropped=time.perf_counter()
         results=self.recognize_crops(crops)
-        self.last_timing={'detection_ms':(detected-started)*1000,
-                          'recognition_ms':(time.perf_counter()-detected)*1000}
+        self.last_timing['crop_ms']=(cropped-detected)*1000
+        self.last_timing['recognition_ms']=(time.perf_counter()-cropped)*1000
         return [{'text':str(text),'confidence':float(score),'polygon':box.tolist(),'source':'onnx_ocr'}
                 for box,(text,score) in zip(mapped,results)]
