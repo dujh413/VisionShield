@@ -325,6 +325,10 @@ class ControlPanel(QWidget):
                     'sensitive_lines':len(self.hits),'effect':self.effect.mode,'radius':self.effect.radius,
                     'control_ms':(time.monotonic()-callback_started)*1000,
                     'blur_ms':self.overlay.blur_ms,'paint_ms':getattr(self.overlay,'last_paint_ms',0),
+                    'blur_backend':getattr(self.overlay,'blur_backend','none'),
+                    'blur_device':getattr(self.overlay,'blur_device',''),
+                    'blur_gpu_ms':getattr(self.overlay,'blur_gpu_ms',0),
+                    'blur_fallback':getattr(self.overlay,'blur_fallback',None),
                     'error':self.error})
         except Exception as error:
             # 保留可点击的控制面板；异常时不静默恢复内容。

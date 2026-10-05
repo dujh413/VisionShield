@@ -52,7 +52,7 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(self.backend.starts, 0)
         self.assertEqual(self.panel.state, 'paused')
         # 其他测试会导入NumPy；以全新解释器检查前端自身的导入边界。
-        code = "import sys, app_shell; print(any(m in sys.modules for m in ('desktop_guard','ocr_worker','cv2','numpy')))"
+        code = "import sys, app_shell; print(any(m in sys.modules for m in ('desktop_guard','ocr_worker','cv2','numpy','gpu_blur')))"
         result = subprocess.check_output([sys.executable, '-c', code], cwd=Path(__file__).resolve().parent)
         self.assertEqual(result.strip(), b'False')
 

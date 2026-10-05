@@ -68,6 +68,22 @@ class OverlayWindow(QWidget):
         return self._renderer.last_error if self._renderer is not None else None
 
     @property
+    def blur_backend(self):
+        return self._renderer.backend if self._renderer is not None else 'none'
+
+    @property
+    def blur_device(self):
+        return self._renderer.device if self._renderer is not None else ''
+
+    @property
+    def blur_gpu_ms(self):
+        return self._renderer.gpu_ms if self._renderer is not None else 0.0
+
+    @property
+    def blur_fallback(self):
+        return self._renderer.fallback if self._renderer is not None else None
+
+    @property
     def last_paint_ms(self):
         """Paint callback duration, excluding compositor/monitor latency."""
         return self._last_paint_ms
