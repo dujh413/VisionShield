@@ -104,17 +104,18 @@ def process_main(root, inputs, outputs, backend='fast'):
         if backend=='fast':
             from fast_ocr import FastOCR
             ocr=FastOCR()
-            stage_timings = []
+            timings, batches = [], []
             def infer(image, native):
                 lines = ocr.recognize(image, native)
-                stage_timings.append(dict(ocr.last_timing))
+                timings.append(dict(ocr.last_timing))
+                batches.extend(ocr.last_batches)
                 return lines
             providers=ocr.providers
         else:
             ocr = build_ocr(root)
             infer=lambda image,native:recognize(ocr,image,native)
             providers={'backend':'paddle_cpu'}
-            stage_timings = []
+            timings, batches = [], []
         outputs.put({'ready': True,'backend':backend,'providers':providers})
         incremental = IncrementalOCR()
         while True:
@@ -122,19 +123,23 @@ def process_main(root, inputs, outputs, backend='fast'):
             if frame is None:
                 return
             started = time.monotonic()
-            stage_timings.clear()
+            timings.clear()
+            batches.clear()
             lines, metrics = incremental.run(frame.image, infer)
             put_latest(outputs, {'frame_id': frame.frame_id, 'captured_at': frame.captured_at,
                                  'ocr_finished_at': time.monotonic(), 'image': frame.image,
                                  'lines': lines, 'cached': metrics['mode']=='cached',
                                  'mode': metrics['mode'], 'area_ratio': metrics['area_ratio'],
-                                 'unknown_regions': metrics['unknown_regions'],
-                                 'regions_count': metrics['regions_count'], 'diff_ms': metrics['diff_ms'],
+                                 'unknown_regions': metrics.get('unknown_regions', []),
+                                 'regions_count': metrics.get('regions_count', 1),
+                                 'diff_ms': metrics.get('diff_ms'),
                                  'capture_ms': frame.capture_ms,
-                                 'queue_wait_ms': max(0, (started-frame.submitted_at)*1000) if frame.submitted_at else None,
+                                 'queue_wait_ms': (started-frame.submitted_at)*1000 if frame.submitted_at else None,
                                  'capture_to_infer_ms': (started-frame.captured_at)*1000,
-                                 'stage_ms': {key: sum(t[key] for t in stage_timings) for key in
-                                              ('preprocess_ms','detection_ms','crop_ms','recognition_ms')} if stage_timings else {},
+                                 'stage_ms': {key:sum(t[key] for t in timings) for key in
+                                              ('preprocess_ms','detection_ms','crop_ms','recognition_ms')} if timings else {},
+                                 'batch_count':len(batches) if backend == 'fast' and ocr.use_dml else None,
+                                 'batch_widths':batches,
                                  'elapsed_ms': (time.monotonic()-started)*1000})
     except Exception as error:
         # 不保存OCR结果或桌面原文，异常详情只出现在终端。
@@ -149,23 +154,54 @@ class OCRWorker:
         self.inputs, self.outputs = ctx.Queue(1), ctx.Queue(2)
         self.process = ctx.Process(target=process_main, args=(str(root), self.inputs, self.outputs,backend), daemon=True)
         self.process.start()
+        self.busy = False
+        self.pending = None
+        self.failed = self.closed = False
+        self.sent_frames = 0
+
+    def _dispatch(self):
+        if self.closed or self.failed or self.busy or self.pending is None:
+            return
+        now = time.monotonic()
+        if not 0 <= now-self.pending.captured_at <= 1.5:
+            self.pending = None
+            return
+        frame = replace(self.pending, submitted_at=now)
+        if put_latest(self.inputs, frame):
+            self.pending = None
+            self.busy = True
+            self.sent_frames += 1
 
     def submit(self, frame):
-        return put_latest(self.inputs, replace(frame, submitted_at=time.monotonic()))
+        if self.closed or self.failed:
+            return False
+        # Waiting frames stay local; only one is serialized for each inference.
+        self.pending = frame
+        self._dispatch()
+        return True
 
     def poll(self):
         items = []
         while True:
             try:
-                items.append(self.outputs.get_nowait())
+                item = self.outputs.get_nowait()
+                items.append(item)
+                if 'lines' in item or 'error' in item:
+                    self.busy = False
+                if 'error' in item:
+                    self.failed = True
+                    self.pending = None
             except queue.Empty:
+                self._dispatch()
                 return items
 
     def close(self):
+        self.closed = True
+        self.pending = None
         self.process.terminate()
         self.process.join(timeout=2)
         if self.process.is_alive():
-            raise TimeoutError("OCR进程未停止")
+            raise TimeoutError('OCR process did not stop')
         # 强制停止子进程时，不等待仍含屏幕图像的队列馈送线程。
         self.inputs.cancel_join_thread()
         self.outputs.cancel_join_thread()

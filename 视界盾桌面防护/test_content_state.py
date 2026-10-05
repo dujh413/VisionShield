@@ -97,6 +97,78 @@ class ContentTests(unittest.TestCase):
         self.state.observe(SimpleNamespace(image=np.zeros((500,500,3),dtype=np.uint8), frame_id=2, captured_at=.1))
         self.assertTrue(self.state.view(.1)['full'])
 
+    def test_live_state_uses_one_exact_difference_and_cached_geometry(self):
+        from unittest.mock import patch
+        import content_state
+        import content_index
+        with patch('content_index.with_context', wraps=content_index.with_context) as geometry:
+            self.state.accept(self.result(), 0.)
+            for identifier in range(2, 5):
+                timestamp = identifier * .1
+                frame = SimpleNamespace(image=self.image.copy(), frame_id=identifier, captured_at=timestamp)
+                with patch('content_state._ExactDifference', wraps=content_state._ExactDifference) as difference:
+                    self.state.observe(frame)
+                    self.assertEqual(difference.call_count, 1)
+                # Only frame identity and text change; the geometry is reused,
+                # while classification must read the fresh text.
+                item = {**self.result([line('普通文字')]), 'frame_id':identifier,
+                        'captured_at':timestamp, 'image':frame.image}
+                with patch('content_state._ExactDifference', wraps=content_state._ExactDifference) as difference:
+                    self.assertTrue(self.state.accept(item, timestamp))
+                    self.assertEqual(difference.call_count, 1)
+                self.assertFalse(self.state.view(timestamp)['hits'])
+            self.assertEqual(geometry.call_count, 1)
+
+    def test_missing_large_label_keeps_live_value_protected_until_complete_coverage(self):
+        label = {'text':'验证码', 'confidence':.99,
+                 'polygon':[[10,10],[200,10],[200,110],[10,110]]}
+        value = line('246810', x=10, y=250)
+        self.state.accept(self.result([label,value]), 0.)
+        latest = self.image.copy(); latest[15,20] = 1
+        for identifier in range(2, 102):
+            timestamp = identifier * .1
+            self.state.observe(SimpleNamespace(image=latest, frame_id=identifier, captured_at=timestamp))
+            self.state.accept({'image':latest,'frame_id':identifier,'captured_at':timestamp,
+                               'lines':[value],'unknown_regions':[(0,0,210,130)]}, timestamp)
+            view = self.state.view(timestamp)
+            self.assertEqual(view['hits'], [])
+            self.assertEqual(view['valid_lines'], 0)
+            self.assertTrue(any(x<=10 and y<=250 and x+w>=190 and y+h>=270
+                                for x,y,w,h in view['rectangles']))
+            self.assertLessEqual(len(self.state._dependencies), 3)
+        self.state.observe(SimpleNamespace(image=latest, frame_id=102, captured_at=10.2))
+        self.state.accept({'image':latest,'frame_id':102,'captured_at':10.2,
+                           'lines':[label,value],'unknown_regions':[]}, 10.2)
+        self.assertTrue(self.state.view(10.2)['coverage_complete'])
+        self.assertEqual(len(self.state.view(10.2)['hits']), 2)
+
+    def test_changed_tile_does_not_invalidate_unchanged_context(self):
+        self.state.accept(self.result([line('13800138000',x=100,y=100)]), 0.)
+        latest = self.image.copy(); latest[10,10] = 1
+        self.state.observe(SimpleNamespace(image=latest, frame_id=2, captured_at=.1))
+        view = self.state.view(.1)
+        self.assertEqual(len(view['hits']), 1)
+        self.assertEqual(view['valid_lines'], 1)
+        self.assertFalse(view['coverage_complete'])
+
+    def test_active_state_keeps_far_changes_separate(self):
+        self.state.accept(self.result([line('13800138000',x=400,y=400)]), 0.)
+        latest = self.image.copy(); latest[10,10] = 1; latest[900,900] = 1
+        self.state.observe(SimpleNamespace(image=latest, frame_id=2, captured_at=.1))
+        view = self.state.view(.1)
+        self.assertFalse(view['full'])
+        self.assertEqual(view['unknown_regions'], 2)
+        self.assertEqual(len(view['hits']), 1)
+
+    def test_invalid_result_does_not_replace_valid_live_state(self):
+        self.state.accept(self.result(), 0.)
+        self.state.observe(SimpleNamespace(image=self.image.copy(),frame_id=2,captured_at=.1))
+        with self.assertRaises(ValueError):
+            self.state.accept({**self.result([line('ordinary')]),'frame_id':2,
+                               'captured_at':.1,'unknown_regions':[(0,0,float('nan'),20)]}, .1)
+        self.assertEqual(self.state.result_frame_id, 1)
+        self.assertEqual(len(self.state.view(.1)['hits']),1)
+
 
 if __name__ == '__main__':
     unittest.main()

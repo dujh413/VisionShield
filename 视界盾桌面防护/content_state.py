@@ -1,8 +1,10 @@
 """Region-valid OCR cache and capture freshness, independent of Qt."""
 import math
 import numpy as np
-from region_geometry import bounds, changed_boxes, intersects, merge_boxes, rectangles, area_ratio
-from sensitive_rules import detect, nearby, rect_of
+from content_index import ContentIndex, _ExactDifference, line_context
+from incremental_regions import bounds, intersects, merge_boxes, regions_from_mask
+from region_geometry import rectangles, area_ratio
+from sensitive_rules import detect, rect_of
 
 
 class ContentState:
@@ -14,6 +16,8 @@ class ContentState:
         self.hits, self.unknown, self.valid_lines = [], [], 0
         self.full_unknown = True
         self.last_submitted_image = self.last_submitted_at = None
+        self._geometry = ContentIndex()
+        self._line_bounds, self._contexts, self._dependencies = [], [], []
 
     def observe(self, frame):
         if self.latest is None or frame.frame_id > self.latest.frame_id:
@@ -28,7 +32,8 @@ class ContentState:
                 or not 0 <= now - captured <= self.result_timeout
                 or type(frame_id) is not int or frame_id <= self.result_frame_id
                 or frame_id > self.latest.frame_id or not isinstance(image, np.ndarray)
-                or image.shape != self.latest.image.shape):
+                or image.shape != self.latest.image.shape or image.ndim != 3
+                or image.shape[2] != 3 or not image.shape[0] or not image.shape[1]):
             return False
         height, width = image.shape[:2]
         lines = item['lines']
@@ -46,41 +51,58 @@ class ContentState:
                 raise ValueError('Invalid OCR coverage rectangle')
         if not lines and not unknown:
             unknown = [(0, 0, width, height)]
-        self.result = {**item, 'unknown_regions': unknown, 'hits': detect(lines, semantic)}
+        # Geometry is stable across cached OCR results; classification always
+        # uses the new text. One precise difference serves all ROI checks.
+        contextual = self._geometry._with_context(lines, image.shape)
+        line_bounds = [bounds(line) for line in contextual]
+        contexts = [line_context(line, image.shape) for line in contextual]
+        difference = _ExactDifference(image, self.latest.image, self._geometry.tile, self._geometry.tiles)
+        dependencies = list(zip(line_bounds, contexts))
+        if self.result is not None and self.result['image'].shape == image.shape:
+            # A missed large label must not shrink the neighbouring value's
+            # dependency in later cached results. Remove an old dependency only
+            # when its source pixels and its complete coverage are confirmed.
+            dependencies.extend((rectangle, context) for rectangle, context in self._dependencies
+                                if difference.changed(context)
+                                or any(intersects(context, box) for box in unknown))
+        dependencies = list(dict.fromkeys(dependencies))
+        hits = detect(contextual, semantic)
+        self.result = {**item, 'lines': contextual, 'unknown_regions': unknown, 'hits': hits}
         self.result_frame_id = frame_id
-        self._revalidate()
+        self._line_bounds, self._contexts, self._dependencies = line_bounds, contexts, dependencies
+        self._revalidate(difference)
         return True
 
-    def _revalidate(self):
+    def _revalidate(self, difference=None):
         self.hits, self.unknown, self.valid_lines = [], [], 0
         self.full_unknown = True
         if self.latest is None or self.result is None or self.result['image'].shape != self.latest.image.shape:
             return
-        changes = changed_boxes(self.result['image'], self.latest.image, padding=6)
+        if difference is None:
+            difference = _ExactDifference(self.result['image'], self.latest.image,
+                                          self._geometry.tile, self._geometry.tiles)
+        changes = (regions_from_mask(difference.mask, self.latest.image.shape, padding=6)
+                   if difference.mask is not None else [])
         lines = self.result['lines']
         unresolved = self.result['unknown_regions'] + changes
-        affected = [i for i, line in enumerate(lines) if any(intersects(bounds(line), b) for b in unresolved)]
-        dependent = set(affected)
-        change_lines = [{'polygon': [[a, b], [c, b], [c, d], [a, d]]} for a, b, c, d in changes]
-        for i, line in enumerate(lines):
-            if (any(nearby(line, lines[j]) for j in affected)
-                    or any(nearby(line, region) for region in change_lines)):
-                dependent.add(i)
-        self.unknown = merge_boxes(self.result['unknown_regions'] + changes
-                                   + [bounds(lines[i]) for i in dependent])
+        dependent = {i for i, context in enumerate(self._contexts)
+                     if difference.changed(context) or any(intersects(context, box) for box in unresolved)}
+        old_unknown = [rectangle for rectangle, context in self._dependencies
+                       if difference.changed(context) or any(intersects(context, box) for box in unresolved)]
+        self.unknown = merge_boxes(unresolved + old_unknown
+                                   + [self._line_bounds[i] for i in dependent])
         # Merged rectangles can touch more lines. Cover each entire discarded line,
         # rather than removing its sensitive hit while exposing the remaining text.
         while True:
-            additional = {i for i, line in enumerate(lines) if i not in dependent
-                          and any(intersects(bounds(line), box) for box in self.unknown)}
+            additional = {i for i, rectangle in enumerate(self._line_bounds) if i not in dependent
+                          and any(intersects(rectangle, box) for box in self.unknown)}
             if not additional:
                 break
             dependent.update(additional)
-            self.unknown = merge_boxes(self.unknown + [bounds(lines[i]) for i in additional])
+            self.unknown = merge_boxes(self.unknown + [self._line_bounds[i] for i in additional])
         self.hits = [hit for hit in self.result['hits'] if hit['line_index'] not in dependent
-                     and not any(intersects(bounds(hit), b) for b in self.unknown)]
-        self.valid_lines = sum(i not in dependent and not any(intersects(bounds(line), b) for b in self.unknown)
-                               for i, line in enumerate(lines))
+                     and not any(intersects(self._line_bounds[hit['line_index']], b) for b in self.unknown)]
+        self.valid_lines = sum(i not in dependent for i in range(len(lines)))
         self.full_unknown = area_ratio(self.unknown, self.latest.image) >= .6 or len(self.unknown) > 32
 
     def view(self, now):

@@ -4,6 +4,10 @@ import time
 import subprocess
 import sys
 import unittest
+import tempfile
+import csv
+import json
+from pathlib import Path
 from unittest.mock import Mock, patch
 import numpy as np
 from PySide6.QtWidgets import QApplication
@@ -175,6 +179,88 @@ class ControlSafetyTests(unittest.TestCase):
             self.tick()
         self.assertFalse(self.panel.protecting)
         self.assertFalse(self.panel.overlay.set_masks.call_args.kwargs['full'])
+
+    def test_latest_pending_frame_replaces_old_request_before_poll_dispatch(self):
+        calls=[]
+        self.panel.worker.submit.side_effect=lambda frame: calls.append(('submit',frame.frame_id)) or True
+        self.panel.worker.poll.side_effect=lambda: calls.append(('poll',None)) or []
+        self.tick()
+        self.assertEqual(calls,[('submit',1),('poll',None)])
+        calls.clear()
+        self.now+=.11
+        self.panel.latest=Frame(2,self.now,{},self.panel.latest.image.copy())
+        self.panel.latest.image[3,3,0]=1
+        self.panel.content.observe(self.panel.latest)
+        self.tick()
+        self.assertEqual(calls,[('submit',2),('poll',None)])
+
+    def test_stable_screen_refreshes_without_duplicate_submission_each_tick(self):
+        self.tick()
+        self.assertEqual(self.panel.worker.submit.call_count,1)
+        for _ in range(5):
+            self.now+=.11
+            self.panel.latest.captured_at=self.now
+            self.tick()
+        self.assertEqual(self.panel.worker.submit.call_count,1)
+        self.now+=3
+        self.panel.latest.captured_at=self.now
+        self.tick()
+        self.assertEqual(self.panel.worker.submit.call_count,2)
+
+    def test_failed_submission_does_not_mark_frame_as_scheduled(self):
+        self.panel.worker.submit.return_value=False
+        self.tick()
+        self.assertIsNone(self.panel.scheduler.image)
+        self.panel.worker.submit.return_value=True
+        self.tick()
+        self.assertIs(self.panel.scheduler.image,self.panel.latest.image)
+
+    def test_pause_discards_scheduler_state(self):
+        self.tick()
+        self.assertIsNotNone(self.panel.scheduler.image)
+        self.panel.pause()
+        self.assertIsNone(self.panel.scheduler.image)
+
+    def test_enabled_performance_log_records_production_coverage_and_timings(self):
+        from performance_log import PerformanceLog
+        with tempfile.TemporaryDirectory() as directory:
+            self.panel.diagnostics=PerformanceLog(directory)
+            self.panel.worker.sent_frames=1
+            self.panel.overlay.blur_ms=2
+            self.panel.overlay.last_paint_ms=3
+            self.panel.worker.poll.return_value=[{'ready':True,'providers':{'det':['CPUExecutionProvider']}}]
+            self.tick()
+            self.assertIsNone(self.panel.error)
+            self.panel.diagnostics.close();self.panel.diagnostics=None
+            with (Path(directory)/'heartbeat.csv').open(encoding='utf-8-sig') as stream:
+                rows=list(csv.DictReader(stream))
+            self.assertEqual(rows[0]['unknown_regions'],'0')
+            self.assertEqual(rows[0]['blur_ms'],'2')
+            self.assertEqual(rows[0]['paint_ms'],'3')
+            events=[json.loads(line) for line in (Path(directory)/'events.jsonl').read_text(encoding='utf-8').splitlines()]
+            self.assertEqual(events[0]['event'],'ocr_ready')
+
+    def test_empty_mode_stranger_alert_matches_detection_only_behavior(self):
+        self.panel.apply_preferences({'effect_text':''})
+        self.panel.camera.last['stranger_detected']=True
+        self.panel.camera.risk.return_value=(True,'检测到旁人')
+        self.tick()
+        self.assertFalse(self.panel.protecting)
+        self.assertIn('遮蔽已关闭',self.panel.alert_message)
+
+    def test_diagnostic_close_failure_resets_state_and_blocks_restart(self):
+        self.panel.diagnostics=Mock()
+        self.panel.diagnostics.close.side_effect=OSError('synthetic failure')
+        self.tick()
+        self.assertFalse(self.panel.pause())
+        self.assertIsNone(self.panel.latest)
+        self.assertIsNone(self.panel.scheduler.image)
+        self.assertFalse(self.panel.ready)
+        self.assertIn('diagnostics:OSError',self.panel.error)
+        with patch('desktop_guard.ScreenCapture') as create_capture:
+            self.panel.start()
+            create_capture.assert_not_called()
+        self.panel.diagnostics=None
 
 
 if __name__=='__main__':unittest.main()
