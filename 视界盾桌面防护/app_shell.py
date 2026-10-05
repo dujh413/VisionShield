@@ -54,7 +54,10 @@ class Backend(QObject):
 
     def accept_service(self):
         self.peer = self.server.nextPendingConnection()
+        if self.peer is None:
+            return
         self.peer.readyRead.connect(self.read_peer_status)
+        self.read_peer_status()  # readyRead绑定前已到达的首包也要处理。
         if self.stopping:
             self.peer.write(b'stop')
             self.peer.flush()
@@ -131,7 +134,7 @@ class Backend(QObject):
                 self.watchdog.stop()
                 self.updated.emit(value)
                 self.changed.emit(value['state'], value['detail'])
-                if value.get('alert'):
+                if isinstance(value.get('alert'), str) and value['alert']:
                     self.alerted.emit(value['alert'])
 
     def discard_errors(self):
@@ -477,11 +480,16 @@ class Shell(QWidget):
             self.detail.setText('机主登记无法启动，请检查运行环境后重试。')
 
     def quit_app(self):
+        if self.quitting:
+            return
         self.quitting = True
         self.set_state('stopping', '正在释放防护资源。')
         self.backend.stop()
 
     def closeEvent(self, event):
+        if self.quitting:
+            event.accept()
+            return
         event.ignore()
         if self.has_tray:
             self.hide()
