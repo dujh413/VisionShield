@@ -22,6 +22,8 @@
 
 ## 显式包验收
 
+`Build.ps1`现在在构建结束后自动执行以下包验收，通过后清理超过24小时、已被替代的构建产物，保留当前包和最近已验收的回退包。摄像头被占用或验收失败时不清理旧版本。独立验收与清理操作见 `构建验收与清理.md`。
+
 ```powershell
 & '.\dist\windows-test-v2\VisionShield\VisionShield.exe' --package-check '完整路径\package-check.json'
 ```
