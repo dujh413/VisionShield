@@ -4,9 +4,11 @@ import sys
 import time
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import numpy as np
 from content_index import ContentIndex
+from content_state import ContentState
 
 
 def synthetic_screen():
@@ -49,6 +51,23 @@ def benchmark(samples=10,warmups=2):
 
 
 class ContentPerformanceTests(unittest.TestCase):
+    def test_controller_content_state_reuses_exact_mask_for_many_lines(self):
+        image,lines = synthetic_screen()
+        state = ContentState()
+        state.observe(SimpleNamespace(image=image,frame_id=1,captured_at=0.))
+        state.accept({'image':image,'lines':lines,'frame_id':1,'captured_at':0.,
+                      'unknown_regions':[]},0.)
+        latest = image.copy();latest[1590,2550] = 255
+        with patch('content_index.np.array_equal',side_effect=AssertionError('repeated source comparison')):
+            state.observe(SimpleNamespace(image=latest,frame_id=2,captured_at=.1))
+            state.accept({'image':image,'lines':lines,'frame_id':2,'captured_at':.05,
+                          'unknown_regions':[]},.1)
+        view = state.view(.1)
+        self.assertEqual(len(view['hits']),140)
+        self.assertFalse(view['full'])
+        self.assertFalse(view['coverage_complete'])
+        self.assertEqual(view['unknown_regions'],1)
+
     def test_many_contexts_reuse_one_difference_without_source_roi_comparisons(self):
         image,lines = synthetic_screen()
         index = ContentIndex()

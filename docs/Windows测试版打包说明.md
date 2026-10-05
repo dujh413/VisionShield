@@ -4,6 +4,8 @@
 
 ## 数据与更新
 
+2026-10-05体验修复版在主界面直接提供模糊化、陌生人弹窗、陌生人音效三个选项，运行中修改立即传给后台。聊天对话区可在暂停状态下校准，图片等应用支持整窗保护；机主短暂姿态丢失使用最多2秒有界宽限。具体操作、默认应用名单及限制见 `应用遮蔽与姿态容错方案_20261005.md`。
+
 公共 YuNet、SFace 和默认 ONNX OCR 模型随软件打包，运行时无需下载模型。个人模板、原文、截图、运行日志、开发环境和模型缓存不打入包。
 
 打包版的本人模板位于 `%LOCALAPPDATA%\VisionShield\private\owner_templates.npz`，运行元数据日志位于 `%LOCALAPPDATA%\VisionShield\records`。设置沿用当前 Windows 用户的 QSettings 配置。更新前退出软件，替换完整软件文件夹，用户数据保持原位置。源码模式保留原有模块内的数据路径；测试版不自动迁移源码里的机主模板，请本人在设置中明确登记。
@@ -19,6 +21,8 @@
 输出为 `dist\windows-test-v2\VisionShield\VisionShield.exe`。输出目录已存在时脚本拒绝覆盖，请换新名称。默认ONNX运行版不包含实验Paddle和MediaPipe依赖；已支持的摄像头和OCR整体流程不受影响。后续改源码、测试并同步仓库，再重建包；已发出的旧 exe 不会自动更新。
 
 ## 显式包验收
+
+`Build.ps1`现在在构建结束后自动执行以下包验收，通过后清理超过24小时、已被替代的构建产物，保留当前包和最近已验收的回退包。摄像头被占用或验收失败时不清理旧版本。独立验收与清理操作见 `构建验收与清理.md`。
 
 ```powershell
 & '.\dist\windows-test-v2\VisionShield\VisionShield.exe' --package-check '完整路径\package-check.json'

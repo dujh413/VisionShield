@@ -6,7 +6,7 @@ import unittest
 import numpy as np
 
 from blur_renderer import (BlurCache, BlurRequest, BlurResult, BlurWorker,
-                           mask_crops, obscure_bgr, physical_to_logical)
+                           box_obscure_bgr, mask_crops, obscure_bgr, physical_to_logical)
 
 
 class ManualWorker:
@@ -26,7 +26,8 @@ class ManualWorker:
     def finish(self, request=None, error=None):
         request = request or self.requests[-1]
         crops = tuple((box, source, np.zeros_like(source)) for box, source in request.crops)
-        self.completed = BlurResult(request.sequence, request.geometry, crops, error=error)
+        self.completed = BlurResult(request.sequence, request.geometry, crops,
+                                    error=error, radius=request.radius)
 
     def cancel(self):
         self.completed = None
@@ -134,6 +135,10 @@ class CacheTests(unittest.TestCase):
 
 
 class GeometryTests(unittest.TestCase):
+    def test_zero_padding_does_not_merge_scoped_l_shape(self):
+        boxes = mask_crops([(0, 0, 100, 40), (0, 40, 40, 60)], (100, 100, 3), padding=0)
+        self.assertEqual(boxes, ((0, 0, 100, 40), (0, 40, 40, 60)))
+
     def test_clipping_outward_rounding_and_overlap_merge(self):
         boxes = mask_crops([(-4.5, 2.2, 20, 10), (12, 10, 10, 10), (80, 40, 8, 6)], (60, 100, 3))
         self.assertEqual(boxes, ((0, 0, 30, 28), (72, 32, 24, 22)))
@@ -148,6 +153,39 @@ class GeometryTests(unittest.TestCase):
 
 
 class WorkerTests(unittest.TestCase):
+    def test_box_radius_keeps_exact_colors_without_legacy_darkening(self):
+        from mask_effect import box_blur
+        image = np.random.default_rng(2).integers(0, 256, (21, 33, 3), dtype=np.uint8)
+        for radius in (0, 1, 2, 8, 10**100):
+            np.testing.assert_array_equal(box_obscure_bgr(image, radius),
+                                          box_blur(image, radius)[:, :, ::-1])
+
+    def test_close_timeout_reports_live_worker_and_discards_completed_content(self):
+        started, release = threading.Event(), threading.Event()
+
+        def render(source):
+            started.set()
+            release.wait(2)
+            return source.copy()
+
+        worker = BlurWorker(render)
+        box = (0, 0, 2, 2)
+        try:
+            worker.submit(BlurRequest(1, (box,), ((box, np.zeros((2, 2, 3), np.uint8)),)))
+            self.assertTrue(started.wait(1))
+            with self.assertRaises(TimeoutError):
+                worker.close(timeout=.01)
+            self.assertTrue(worker.alive)
+            self.assertFalse(worker.submit(BlurRequest(2, (), ())))
+            self.assertIsNone(worker.poll())
+            release.set()
+            worker.close()
+            self.assertFalse(worker.alive)
+            self.assertIsNone(worker.poll())
+        finally:
+            release.set()
+            worker.close()
+
     def test_pending_queue_replaces_intermediate_work_and_close_clears(self):
         started, release = threading.Event(), threading.Event()
         calls = []

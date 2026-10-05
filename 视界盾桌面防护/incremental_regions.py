@@ -99,6 +99,16 @@ def changed_regions(previous, current, lines, padding=64, tile_size=64, max_tile
     if tile_size <= 0 or max_tiles <= 0 or padding < 0:
         raise ValueError('invalid crop bounds')
     mask = difference_mask(previous, current)
+    return regions_from_mask(mask, current.shape, lines, padding, tile_size, max_tiles)
+
+
+def regions_from_mask(mask, shape, lines=(), padding=64, tile_size=64, max_tiles=256):
+    """Reuse an exact mask; coordinate validation never compares source pixels twice."""
+    height, width = shape[:2]
+    if mask.shape != (height, width) or mask.dtype != np.bool_:
+        raise ValueError('expected a matching exact pixel-difference mask')
+    if tile_size <= 0 or max_tiles <= 0 or padding < 0:
+        raise ValueError('invalid crop bounds')
     occupied = np.logical_or.reduceat(mask, np.arange(0, height, tile_size), axis=0)
     occupied = np.logical_or.reduceat(occupied, np.arange(0, width, tile_size), axis=1)
     cells = np.argwhere(occupied)
@@ -113,18 +123,18 @@ def changed_regions(previous, current, lines, padding=64, tile_size=64, max_tile
         rows, columns = np.nonzero(mask[y:y + tile_size, x:x + tile_size])
         rectangle = (x + int(columns.min()), y + int(rows.min()),
                      x + int(columns.max()) + 1, y + int(rows.max()) + 1)
-        boxes.append(padded(rectangle, current.shape, padding))
+        boxes.append(padded(rectangle, shape, padding))
 
     line_boxes = [bounds(line) for line in lines]
     for rectangle in line_boxes:
-        x1, y1, x2, y2 = padded(rectangle, current.shape, 0)
+        x1, y1, x2, y2 = padded(rectangle, shape, 0)
         if x1 < x2 and y1 < y2 and mask[y1:y2, x1:x2].any():
-            boxes.append(padded(rectangle, current.shape, padding))
+            boxes.append(padded(rectangle, shape, padding))
 
     boxes = merge_boxes(boxes)
     # Four pixels around indirectly intersecting lines preserve their complete
     # glyphs without repeatedly growing a 64-pixel halo through nearby rows.
-    contexts = [padded(rectangle, current.shape, 4) for rectangle in line_boxes]
+    contexts = [padded(rectangle, shape, 4) for rectangle in line_boxes]
     while True:
         expanded = []
         for box in boxes:

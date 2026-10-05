@@ -23,4 +23,6 @@ try {
 }
 $readme = Get-ChildItem -LiteralPath (Join-Path $repo 'docs') -Filter 'Windows*.md' | Select-Object -First 1
 if ($readme) { Copy-Item -LiteralPath $readme.FullName -Destination (Join-Path $destination 'VisionShield\README.md') }
+& (Join-Path $PSScriptRoot 'Verify-Package.ps1') -OutputName $OutputName
+& (Join-Path $PSScriptRoot 'Clean-Artifacts.ps1') -CurrentOutput $OutputName -Apply
 Write-Output (Join-Path $destination 'VisionShield\VisionShield.exe')
