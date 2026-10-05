@@ -22,6 +22,8 @@ class ControlPanel(QWidget):
     def __init__(self, semantic=False, integrated=False, shield_enabled=True):
         super().__init__()
         self.shield_enabled = shield_enabled
+        self.exclusion_verified = False
+        self.app_profiles = {}
         self.setWindowTitle('视界盾 · 主屏自动防护')
         from PySide6.QtCore import Qt
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
@@ -78,6 +80,7 @@ class ControlPanel(QWidget):
             if self.shield_enabled:
                 if not verify_exclusion(self.capture, self.overlay):
                     raise RuntimeError('遮罩实际采集排除验证失败；未启动自动模式，请更换捕获方案')
+                self.exclusion_verified = True
                 self.overlay.set_masks([], full=True)
             else:
                 self.overlay.hide()
@@ -109,6 +112,36 @@ class ControlPanel(QWidget):
         except Exception as error:
             self.pause()
             self.status.setText(f'未启动：{error}')
+
+    def apply_preferences(self, value):
+        from app_scope import valid_profiles
+        if isinstance(value.get('app_profiles'), dict):
+            self.app_profiles = valid_profiles(value['app_profiles'])
+        enabled = value.get('shield_enabled')
+        if not isinstance(enabled, bool) or enabled == self.shield_enabled:
+            return
+        if enabled and self.overlay is not None and not self.exclusion_verified:
+            from capture_probe import verify_exclusion
+            capture = ScreenCapture()
+            try:
+                self.overlay.show()
+                if not verify_exclusion(capture, self.overlay):
+                    raise RuntimeError('遮罩采集排除验证失败')
+                self.exclusion_verified = True
+            except Exception as error:
+                self.overlay.hide()
+                self.error = str(error)
+                return
+            finally:
+                capture.close()
+        self.shield_enabled = enabled
+        if self.overlay is not None:
+            self.overlay.set_masks([], full=False)
+            if enabled:
+                self.overlay.show()
+            else:
+                self.overlay.hide()
+                self.protecting = False
 
     def pause(self):
         self.timer.stop()
@@ -143,11 +176,12 @@ class ControlPanel(QWidget):
             sensor = self.camera if self.integrated else self.bridge
             sensor.poll()
             risk, reason = sensor.risk(now)
-            confirmed_risk = not self.integrated or sensor.last is not None or sensor.error is not None
+            confirmed_risk = (bool(sensor.last and sensor.last.get('stranger_detected', False))
+                              if self.integrated else risk)
             if risk and confirmed_risk and not self.last_risk and now-self.last_alert_at>=10:
                 self.alert_message = reason+('，已启用隐私遮蔽。' if self.shield_enabled else '，遮蔽已关闭，请注意屏幕内容。')
                 self.last_alert_at = now
-            self.last_risk = risk if confirmed_risk else False
+            self.last_risk = confirmed_risk
             ocr_ms = None
             if now-self.last_capture >= 0.1:
                 frame = self.capture.latest()
@@ -192,8 +226,14 @@ class ControlPanel(QWidget):
             self.protecting = protecting
             full = protecting and (self.latest is None or self.last_ocr_finished is None or bool(self.error) or stale or capture_stale)
             rectangles = ([rect_of(hit['polygon']) for hit in self.hits]+self.content.pending_rectangles()) if protecting else []
-            self.overlay.set_masks(rectangles, full=full, image=self.latest.image if self.latest is not None else None)
-            state = '异常全屏保护' if self.error else '临时全屏保护' if full else '敏感行保护' if protecting else '正常显示'
+            scoped = False
+            if protecting and self.latest is not None and self.latest.monitor_rect:
+                from app_scope import application_masks, window_inventory
+                windows = window_inventory(self.latest.monitor_rect)
+                rectangles, full = application_masks(windows, rectangles, full, self.app_profiles)
+                scoped = bool(windows)
+            self.overlay.set_masks(rectangles, full=full, image=self.latest.image if self.latest is not None else None, padding=0 if scoped else 8)
+            state = '异常保护' if self.error else '临时全屏保护' if full else '应用区域保护' if protecting else '正常显示'
             if not self.shield_enabled:
                 state = '仅检测与提示（不遮蔽）' + (' · 检测异常' if self.error else ' · 存在风险' if risk_active else '')
             self.status.setText(f'{state} · {reason}\nOCR：'+('异常' if self.error else '已就绪' if self.ready else '加载中'))
