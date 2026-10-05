@@ -24,6 +24,7 @@ class EnrollmentFlowTests(unittest.TestCase):
             image=np.zeros((480,640,3),dtype=np.uint8)
             face=np.array([100,100,100,100]+[0]*11,dtype=np.float32)
             detector=Mock();detector.detect.return_value=(None,np.array([face]))
+            scanner=Mock();scanner.detect.return_value=[face]
             def read():
                 frame_count[0]+=1
                 if frame_count[0]>=32:stop.set()
@@ -38,6 +39,7 @@ class EnrollmentFlowTests(unittest.TestCase):
             camera.read.side_effect=read
             with patch('camera_test.open_camera',return_value=camera),\
                  patch('identity_test.load_models',return_value=(detector,Mock())),\
+                 patch('face_detection.FaceScanner',return_value=scanner),\
                  patch('identity_test.extract',side_effect=feature),\
                  patch('owner_enrollment.time.monotonic',side_effect=now):
                 enroll_main(root,stop,enroll,output)

@@ -18,7 +18,7 @@ data = [(str(path), target) for path, target in models]
 data += collect_data_files('rapidocr_onnxruntime', excludes=['models/*'])
 data += collect_data_files('uiautomation')
 data += collect_data_files('comtypes', include_py_files=True)
-hidden = ['guard_service', 'app_shell', 'desktop_guard', 'camera_worker', 'owner_enrollment',
+hidden = ['guard_service', 'app_shell', 'desktop_guard', 'camera_worker', 'owner_enrollment', 'face_detection',
           'fast_ocr', 'gpu_blur', 'native_text', 'package_check', 'identity_test', 'camera_test',
           'owner_tracking', 'identity_state', 'identity_sender', 'owner_presence', 'app_scope', 'scope_picker',
           'region_tracker', 'region_features', 'region_anchor', 'region_worker']

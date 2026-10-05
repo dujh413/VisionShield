@@ -27,7 +27,8 @@ class ManualWorker:
         request = request or self.requests[-1]
         crops = tuple((box, source, np.zeros_like(source)) for box, source in request.crops)
         self.completed = BlurResult(request.sequence, request.geometry, crops,
-                                    error=error, radius=request.radius)
+                                    error=error, radius=request.radius,
+                                    created_at=request.created_at)
 
     def cancel(self):
         self.completed = None
@@ -40,6 +41,8 @@ class CacheTests(unittest.TestCase):
     def setUp(self):
         self.worker = ManualWorker()
         self.cache = BlurCache(self.worker)
+        self.now = 100.0
+        self.cache._clock = lambda: self.now
         self.image = np.full((80, 120, 3), 255, dtype=np.uint8)
         self.boxes = ((10, 20, 30, 10),)
 
@@ -71,18 +74,23 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(pending, [])
         self.assertEqual(len(self.worker.requests), 1)
 
-    def test_single_changed_pixel_invalidates_even_same_image_object(self):
-        self.ready()
+    def test_changed_pixels_bridge_opaque_render_and_schedule_new_crop(self):
+        old = self.ready()
         self.image[20, 10, 0] -= 1
+        ready, pending = self.cache.update(self.boxes, self.image)
+        self.assertIs(ready[0][1], old[0][1])
+        self.assertEqual(pending, [])
+        self.assertEqual(len(self.worker.requests), 2)
+        self.now += .251
         ready, pending = self.cache.update(self.boxes, self.image)
         self.assertEqual(ready, [])
         self.assertEqual(pending, list(self.boxes))
-        self.assertEqual(len(self.worker.requests), 2)
 
     def test_stale_completion_is_never_displayed(self):
         self.cache.update(self.boxes, self.image)
         old = self.worker.requests[-1]
         self.image[20, 10] = 0
+        self.now += .251
         self.cache.update(self.boxes, self.image)
         self.worker.finish(old)
         ready, pending = self.cache.update(self.boxes, self.image)
@@ -124,14 +132,54 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(len(self.worker.requests), 1)  # bounded retry/backoff
         self.assertEqual(self.cache.update(self.boxes, None), ([], list(self.boxes)))
 
-    def test_mixed_valid_and_changed_regions_keep_pending_fallback(self):
+    def test_mixed_regions_bridge_only_bounded_changed_content(self):
         self.boxes += ((70, 10, 20, 20),)
         self.ready()
         self.image[10, 70] = 0
         ready, pending = self.cache.update(self.boxes, self.image)
+        self.assertEqual([box for box, _ in ready], list(self.boxes))
+        self.assertEqual(pending, [])
+        self.assertEqual([box for box, _ in self.worker.requests[-1].crops], [self.boxes[1]])
+        self.now += .251
+        ready, pending = self.cache.update(self.boxes, self.image)
         self.assertEqual([box for box, _ in ready], [self.boxes[0]])
         self.assertEqual(pending, [self.boxes[1]])
         self.assertEqual([box for box, _ in self.worker.requests[-1].crops], [self.boxes[1]])
+
+    def test_fresh_completion_can_cover_new_frame_without_exposing_underlying_pixels(self):
+        self.cache.update(self.boxes, self.image)
+        captured = self.worker.requests[-1]
+        self.now += .1
+        self.image[20:30, 10:40] = 100
+        self.cache.update(self.boxes, self.image)
+        self.worker.finish(captured)
+        ready, pending = self.cache.update(self.boxes, self.image)
+        self.assertEqual(pending, [])
+        self.assertEqual(len(ready), 1)
+        self.assertTrue(np.all(ready[0][1] == 0))  # rendered RGB, not raw new content
+        self.assertEqual(len(self.worker.requests), 2)
+
+    def test_clear_generation_and_strength_change_reject_old_completions(self):
+        self.cache.update(self.boxes, self.image)
+        old = self.worker.requests[-1]
+        self.cache.clear()
+        self.worker.finish(old)
+        self.assertEqual(self.cache.update(self.boxes, self.image)[0], [])
+        self.worker.finish()
+        self.assertTrue(self.cache.update(self.boxes, self.image)[0])
+        self.cache.set_radius(40)
+        self.worker.finish(old)
+        self.assertEqual(self.cache.update(self.boxes, self.image)[0], [])
+        self.assertEqual(self.worker.requests[-1].radius, 40)
+
+    def test_future_completion_timestamp_cannot_extend_bridge(self):
+        self.cache.update(self.boxes, self.image)
+        request = self.worker.requests[-1]
+        self.image[20:30, 10:40] = 0
+        crops = tuple((box, source, np.zeros_like(source)) for box, source in request.crops)
+        self.worker.completed = BlurResult(request.sequence, request.geometry, crops,
+                                          created_at=self.now+100)
+        self.assertEqual(self.cache.update(self.boxes, self.image)[0], [])
 
 
 class GeometryTests(unittest.TestCase):

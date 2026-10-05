@@ -1,19 +1,73 @@
 """摄像头基本测试；只显示画面，不保存视频或照片。"""
 import argparse
+import threading
 import time
 
 import cv2
 
 
-def open_camera(index, backend):
+def open_camera(index, backend, resolution=(640, 480)):
     backends = {"auto": cv2.CAP_ANY, "dshow": cv2.CAP_DSHOW, "msmf": cv2.CAP_MSMF}
     camera = cv2.VideoCapture(index, backends[backend])
     if not camera.isOpened():
         camera.release()
         raise RuntimeError("摄像头未打开：检查权限、设备编号及其他程序是否占用。")
-    camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    camera.set(cv2.CAP_PROP_FRAME_WIDTH, resolution[0])
+    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, resolution[1])
+    camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     return camera
+
+
+class LatestCameraFrame:
+    """持续排空设备帧，仅保留最新一帧，避免低频推理积累摄像头旧画面。"""
+    def __init__(self, camera):
+        self.camera = camera
+        self.condition = threading.Condition()
+        self.stopped = False
+        self.failed = False
+        self.frame = None
+        self.sequence = 0
+        self.consumed = 0
+        self.captured_at = None
+        self.last_consumed_at = None
+        self.thread = threading.Thread(target=self._capture,daemon=True)
+        self.thread.start()
+
+    def _capture(self):
+        while not self.stopped:
+            try:
+                ok, frame = self.camera.read()
+            except Exception:
+                ok, frame = False, None
+            with self.condition:
+                if self.stopped:
+                    return
+                if not ok:
+                    self.failed = True
+                    self.condition.notify_all()
+                    return
+                self.frame = frame
+                self.captured_at = time.monotonic()
+                self.sequence += 1
+                self.condition.notify_all()
+
+    def read(self, timeout=1.5):
+        with self.condition:
+            available = self.condition.wait_for(
+                lambda:self.failed or self.stopped or self.sequence != self.consumed,timeout)
+            if not available or self.failed or self.stopped:
+                return False, None
+            self.consumed = self.sequence
+            self.last_consumed_at = self.captured_at
+            return True, self.frame
+
+    def close(self):
+        with self.condition:
+            self.stopped = True
+            self.frame = None
+            self.condition.notify_all()
+        self.camera.release()
+        self.thread.join(timeout=1)
 
 
 def window_closed(name):

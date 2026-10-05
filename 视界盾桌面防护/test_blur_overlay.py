@@ -33,7 +33,7 @@ class BlurTests(unittest.TestCase):
             time.sleep(.005)
         self.fail('background blur did not complete')
 
-    def test_unrelated_pixels_reuse_qimage_but_changed_roi_falls_back(self):
+    def test_changed_roi_keeps_opaque_blur_while_next_render_is_pending(self):
         overlay = self.make_overlay()
         image = np.full((200, 400, 3), 255, np.uint8)
         masks = [(30, 50, 170, 20)]
@@ -46,14 +46,15 @@ class BlurTests(unittest.TestCase):
             self.assertIs(overlay.blurs[0][1], old)
             changed[50, 30, 0] -= 1
             overlay.set_masks(masks, image=changed)
-            self.assertEqual(overlay.blurs, [])
-            self.assertEqual(overlay.grab().toImage().pixelColor(100, 60).getRgb(), (20, 24, 32, 255))
+            self.assertIs(overlay.blurs[0][1], old)
+            self.assertEqual(overlay.grab().toImage().pixelColor(100, 60).alpha(), 255)
+            self.assertEqual(overlay.grab().toImage().pixelColor(300, 150).alpha(), 0)
             self.assertIsNotNone(overlay.blur_ms)
             self.assertGreaterEqual(overlay.last_paint_ms, 0)
         finally:
             overlay.close()
 
-    def test_stale_completion_and_radius_switch_cannot_draw_old_pixels(self):
+    def test_capture_bridge_and_radius_switch_reject_previous_strength(self):
         started, release = threading.Event(), threading.Event()
         calls = []
 
@@ -62,7 +63,7 @@ class BlurTests(unittest.TestCase):
             if len(calls) == 1:
                 started.set()
                 release.wait(2)
-            return box_obscure_bgr(source, 2)
+            return box_obscure_bgr(source, overlay.effect.radius)
 
         overlay = self.make_overlay()
         overlay._renderer = BlurCache(BlurWorker(render), radius=2)
@@ -79,7 +80,8 @@ class BlurTests(unittest.TestCase):
             self.assertEqual(len(calls), 2)
             old_worker = overlay.blur_worker
             overlay.set_effect(parse_effect('0'))
-            self.assertFalse(old_worker.alive)
+            self.assertIs(overlay.blur_worker, old_worker)  # retain owned GPU session
+            self.assertTrue(old_worker.alive)
             self.assertEqual(overlay.blurs, [])
             self.finish_blur(overlay, masks, image, padding=0)
             box, rendered = overlay.blurs[0]
@@ -114,18 +116,18 @@ class BlurTests(unittest.TestCase):
             self.assertIsNone(overlay.mask_image)
             self.assertEqual(overlay.blurs, [])
             overlay.show()
-            self.assertEqual(overlay.grab().toImage().pixelColor(20, 20).getRgb(), (20, 24, 32, 255))
+            self.assertEqual(overlay.grab().toImage().pixelColor(20, 20).alpha(), 0)
             self.finish_blur(overlay, masks, image)
             worker = overlay.blur_worker
             overlay.screen_geometry_changed(overlay.geometry())
             self.assertFalse(worker.alive)
-            self.assertTrue(overlay.full)
+            self.assertFalse(overlay.full)
             self.assertIsNone(overlay.mask_image)
             self.assertEqual(overlay.blurs, [])
         finally:
             overlay.close()
 
-    def test_close_timeout_reaches_controller_and_keeps_dark_fallback(self):
+    def test_close_timeout_reaches_controller_and_keeps_only_scoped_fallback(self):
         started, release = threading.Event(), threading.Event()
 
         def render(source):
@@ -144,10 +146,11 @@ class BlurTests(unittest.TestCase):
                 with self.assertRaises(TimeoutError):
                     overlay.close()
             self.assertIs(overlay.blur_worker, worker)
-            self.assertTrue(overlay.full)
+            self.assertFalse(overlay.full)
             self.assertEqual(overlay.blurs, [])
             self.assertIsNone(overlay.mask_image)
             self.assertEqual(overlay.grab().toImage().pixelColor(100, 60).getRgb(), (20, 24, 32, 255))
+            self.assertEqual(overlay.grab().toImage().pixelColor(300, 150).alpha(), 0)
             release.set()
             overlay.close()
             self.assertFalse(worker.alive)
@@ -196,7 +199,7 @@ class BlurTests(unittest.TestCase):
             self.assertEqual(snapshot.pixelColor(201,60).alpha(),0)
         finally:overlay.close()
 
-    def test_old_blur_result_is_not_drawn_on_changed_pixels(self):
+    def test_expired_blur_result_is_not_drawn_on_changed_pixels(self):
         with patch('overlay_window.exclude_capture'):
             overlay=OverlayWindow(self.app.primaryScreen())
         try:
@@ -211,6 +214,8 @@ class BlurTests(unittest.TestCase):
                 time.sleep(.01)
             self.assertTrue(overlay.blurs)
             changed=np.zeros_like(source)
+            now = time.monotonic()
+            overlay._renderer._clock = lambda: now+.251
             with patch.object(overlay.blur_worker,'poll',return_value=None):
                 overlay.set_masks(mask,image=changed,padding=0)
             self.assertFalse(overlay.blurs)
@@ -236,6 +241,74 @@ class BlurTests(unittest.TestCase):
             self.assertEqual(snapshot.pixelColor(75,75).alpha(),0)
             self.assertEqual(snapshot.pixelColor(20,75).alpha(),255)
         finally:overlay.close()
+
+    def test_missing_bad_source_and_render_exception_never_expand_the_scope(self):
+        overlay = self.make_overlay()
+        mask = [(30, 50, 170, 20)]
+        try:
+            for image in (None, np.zeros((200, 400), np.float32),
+                          np.zeros((20, 20, 3), np.uint8)):
+                overlay.set_masks(mask, image=image, padding=0)
+                snapshot = overlay.grab().toImage()
+                self.assertFalse(overlay.full)
+                self.assertEqual(snapshot.pixelColor(100, 60).alpha(), 255)
+                self.assertEqual(snapshot.pixelColor(20, 60).alpha(), 0)
+                self.assertEqual(snapshot.pixelColor(201, 60).alpha(), 0)
+            overlay.set_masks(mask + [(float('nan'), 0, 10, 10)], padding=0)
+            self.assertEqual(overlay.grab().toImage().pixelColor(300, 150).alpha(), 0)
+            self.assertEqual(overlay.grab().toImage().pixelColor(100, 60).alpha(), 255)
+        finally:
+            overlay.close()
+
+    def test_move_and_effect_switch_clear_vacated_pixels_without_a_transparent_scope(self):
+        overlay = self.make_overlay()
+        image = np.full((200, 400, 3), 255, np.uint8)
+        first, second = [(30, 50, 80, 20)], [(230, 120, 80, 20)]
+        try:
+            self.finish_blur(overlay, first, image, padding=0)
+            overlay.set_masks(second, image=image, padding=0)
+            self.app.processEvents()
+            shot = overlay.grab().toImage()
+            self.assertEqual(shot.pixelColor(60, 60).alpha(), 0)
+            self.assertEqual(shot.pixelColor(260, 130).alpha(), 255)
+            self.assertEqual(shot.pixelColor(160, 60).alpha(), 0)
+            overlay.set_effect(parse_effect('遮挡'))
+            shot = overlay.grab().toImage()
+            self.assertEqual(shot.pixelColor(260, 130).alpha(), 255)
+            self.assertEqual(shot.pixelColor(60, 60).alpha(), 0)
+            overlay.set_effect(parse_effect('8'))
+            shot = overlay.grab().toImage()
+            self.assertFalse(overlay.full)
+            self.assertEqual(shot.pixelColor(260, 130).alpha(), 255)
+            self.assertEqual(shot.pixelColor(60, 60).alpha(), 0)
+        finally:
+            overlay.close()
+
+    def test_dynamic_frames_keep_stable_opaque_blur_and_transparent_outside(self):
+        def render(source):
+            time.sleep(.008)
+            return box_obscure_bgr(source, 2)
+
+        overlay = self.make_overlay()
+        overlay._renderer = BlurCache(BlurWorker(render), radius=2)
+        image = np.full((200, 400, 3), 210, np.uint8)
+        masks = [(30, 50, 170, 20)]
+        try:
+            self.finish_blur(overlay, masks, image, padding=0)
+            for phase in range(40):
+                image = np.full((200, 400, 3), 200+phase, np.uint8)
+                overlay.set_masks(masks, image=image, padding=0)
+                shot = overlay.grab().toImage()
+                color = shot.pixelColor(100, 60)
+                self.assertEqual(color.alpha(), 255)
+                self.assertGreaterEqual(color.red(), 190)  # no alternating black placeholder
+                self.assertEqual(shot.pixelColor(300, 150).alpha(), 0)
+                self.app.processEvents()
+                time.sleep(.025)
+        finally:
+            worker = overlay.blur_worker
+            overlay.close()
+            self.assertFalse(worker.alive)
 
 
 if __name__=='__main__':unittest.main()

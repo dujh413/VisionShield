@@ -3,6 +3,7 @@ import time
 
 
 def check(app):
+    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QWidget
     from app_scope import window_inventory, application_masks
     from region_anchor import native_nodes
@@ -10,6 +11,7 @@ def check(app):
     from region_worker import RegionWorker
     from screen_capture import ScreenCapture
     window = QWidget()
+    window.setWindowFlags(Qt.Tool | Qt.WindowStaysOnTopHint)
     window.setWindowTitle('VisionShield synthetic region check')
     window.setGeometry(80, 130, 600, 400)
     child = QWidget(window)
@@ -17,6 +19,7 @@ def check(app):
     child.setStyleSheet('background: #547b98')
     child.winId()
     window.show()
+    window.raise_()
     app.processEvents()
     worker = RegionWorker()
     capture = ScreenCapture()
@@ -54,7 +57,7 @@ def check(app):
             app.processEvents()
             inventory = window_inventory(capture.monitor)
             target = next(w for w in inventory if w['handle'] == int(window.winId()))
-            target = dict(target, mode='lines')  # 仅诊断自身窗口；产品默认排除自身。
+            target = dict(target, mode='lines',own_ui=False)  # 仅诊断自身窗口；产品默认排除自身。
             expected = next(n['rect'] for n in native_nodes(target['handle'], (0, 0)) if n['handle'] == int(child.winId()))
             scopes = tracker.resolve({target['key']: profile}, [target], capture.grab().image)
             actual = scopes[target['key']]['rect']

@@ -58,7 +58,7 @@ class GuiEffectTests(unittest.TestCase):
         color = self.overlay.grab().toImage().pixelColor(30,30)
         self.assertEqual((color.red(),color.green(),color.blue()), (92,92,92))
 
-    def test_input_is_applied_only_when_start_is_clicked(self):
+    def test_slider_and_style_apply_to_running_overlay_without_restart(self):
         import tempfile
         from pathlib import Path
         from types import SimpleNamespace
@@ -87,12 +87,13 @@ class GuiEffectTests(unittest.TestCase):
                     button.click()
                     self.assertEqual(panel.effect.mode,'off')
                     panel.effect_input.setText('8')
-                    self.assertEqual(panel.effect.mode,'off')
-                    button.click()
                     self.assertEqual((panel.effect.mode,panel.effect.radius),('blur',8))
+                    panel.effect_input.slider.setValue(36)
+                    self.assertEqual((panel.effect.mode,panel.effect.radius),('blur',36))
+                    self.assertEqual(panel.overlay.effect,panel.effect)
                     panel.effect_input.setText('遮挡')
-                    button.click()
                     self.assertEqual(panel.effect.mode,'block')
+                    self.assertEqual(panel.overlay.effect,panel.effect)
             finally:
                 panel.pause()
                 panel.deleteLater()

@@ -12,6 +12,7 @@ from camera_test import open_camera, window_closed
 from owner_tracking import ShortTracker
 from identity_state import IdentityGate
 from identity_sender import IdentitySender
+from face_detection import FaceScanner
 
 
 def load_models(root):
@@ -20,7 +21,7 @@ def load_models(root):
     recognizer_buffer = np.frombuffer((root / 'models/face_recognition_sface_2021dec.onnx').read_bytes(), dtype=np.uint8)
     empty = np.empty(0, dtype=np.uint8)
     detector = cv2.FaceDetectorYN.create(
-        'onnx', detector_buffer, empty, (640, 480), 0.9)
+        'onnx', detector_buffer, empty, (640, 480), 0.6, 0.45)
     try:
         recognizer = cv2.FaceRecognizerSF.create('onnx', recognizer_buffer, empty)
     except TypeError:
@@ -39,18 +40,28 @@ def load_models(root):
     return detector, recognizer
 
 
-def extract(frame, face, recognizer):
+def extract(frame, face, recognizer, diagnostics=None, min_sharpness=60):
     x, y, w, h = face[:4]
     if min(w, h) < 80:
+        if diagnostics is not None:diagnostics['quality_reason']='too_small'
         return None
     crop = recognizer.alignCrop(frame, face)
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    if cv2.Laplacian(gray, cv2.CV_64F).var() < 60 or not 40 <= gray.mean() <= 220:
+    sharpness,brightness=float(cv2.Laplacian(gray, cv2.CV_64F).var()),float(gray.mean())
+    if diagnostics is not None:
+        # 策略使用原始精度；显示/日志在元数据边界统一四舍五入。
+        diagnostics.update(sharpness=sharpness,brightness=brightness)
+    if sharpness < min_sharpness or not 40 <= brightness <= 220:
+        if diagnostics is not None:diagnostics['quality_reason']='blur' if sharpness < min_sharpness else 'brightness'
         return None
     feature = recognizer.feature(crop).reshape(-1)
     norm = float(np.linalg.norm(feature))
     if not np.isfinite(feature).all() or not np.isfinite(norm) or norm<1e-9:
+        if diagnostics is not None:diagnostics['quality_reason']='invalid_feature'
         return None
+    if diagnostics is not None:
+        diagnostics['quality_reason']='accepted'
+        diagnostics['quality_level']='moderate_blur' if sharpness<60 else 'clear'
     return feature / norm
 
 
@@ -81,6 +92,7 @@ def main():
         if templates.ndim != 2 or templates.shape[0] < 1 or not np.isfinite(templates).all():
             raise ValueError('Invalid template. Delete private/owner_templates.npz and enroll again.')
     tracker, gate = ShortTracker(), IdentityGate()
+    scanner = FaceScanner(detector)
     samples, enrolling, enroll_id = [], False, None
     last_sample, last_ms = 0, -1
     camera = None
@@ -92,7 +104,7 @@ def main():
     message = 'E: enroll with only yourself visible; saves local feature templates'
     start = time.perf_counter()
     try:
-        camera = open_camera(args.camera, args.backend)
+        camera = open_camera(args.camera, args.backend, resolution=(1280, 720))
         with log_path.open('w', encoding='utf-8-sig', newline='') as log:
             writer = csv.writer(log)
             writer.writerow(['ms', 'state', 'faces', 'owner_track', 'best_score', 'protect_request', 'enroll_samples'])
@@ -103,9 +115,7 @@ def main():
                 height, width = frame.shape[:2]
                 ms = max(last_ms + 1, int((time.perf_counter() - start) * 1000))
                 last_ms = ms
-                detector.setInputSize((width, height))
-                _, faces = detector.detect(frame)
-                faces = [] if faces is None else list(faces)
+                faces = scanner.detect(frame)
                 boxes = [(float(f[0])/width, float(f[1])/height,
                           float(f[0]+f[2])/width, float(f[1]+f[3])/height) for f in faces]
                 tracks = tracker.update(boxes, ms)

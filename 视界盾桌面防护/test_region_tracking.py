@@ -40,6 +40,18 @@ class RegionTrackingTests(unittest.TestCase):
     def test_visual_loss_does_not_return_previous_fixed_coordinates(self):
         self.assertIsNone(locate_features(np.full_like(self.image,255),(0,0,1000,700),self.features))
 
+    def test_visual_tracker_clears_prior_scope_when_current_frame_loses_features(self):
+        tracker=RegionTracker();window=self.window()
+        profile={'mode':'tracked','anchor':{'type':'visual'},'features':self.features,
+                 'binding':{'handle':20,'pid':30}}
+        try:
+            first=tracker.resolve({window['key']:profile},[window],self.image,now=1)
+            self.assertIsNotNone(first[window['key']]['rect'])
+            scopes=tracker.resolve({window['key']:profile},[window],np.full_like(self.image,255),now=2)
+            self.assertIsNone(scopes[window['key']]['rect'])
+            self.assertEqual(application_masks([window],[],False,{window['key']:profile},scopes)[0],[])
+        finally:tracker.close()
+
     def test_repeated_ambiguous_pattern_is_rejected(self):
         image=np.full_like(self.image,255);image[50:270,50:350]=self.patch;image[400:620,550:850]=self.patch
         self.assertIsNone(locate_features(image,(0,0,1000,700),self.features))
@@ -74,12 +86,12 @@ class RegionTrackingTests(unittest.TestCase):
         self.assertEqual(scopes,{});locate.assert_not_called()
         self.assertEqual(application_masks([other],[],False,{other['key']:profile},scopes)[0],[])
 
-    def test_lost_anchor_expands_to_target_window(self):
+    def test_lost_anchor_never_expands_outside_selection(self):
         profile=self.profile();profile.pop('features');window=self.window()
         tracker=RegionTracker()
         with patch('region_anchor.locate_anchor',return_value=None):
             scopes=tracker.resolve({window['key']:profile},[window],self.image,now=1)
-        self.assertEqual(application_masks([window],[],False,{window['key']:profile},scopes)[0],[window['rect']])
+        self.assertEqual(application_masks([window],[],False,{window['key']:profile},scopes)[0],[])
 
     def test_features_and_window_handle_are_not_persisted(self):
         stored=stored_profiles({'app':self.profile()})['app']
@@ -89,7 +101,7 @@ class RegionTrackingTests(unittest.TestCase):
     def test_legacy_coordinate_profile_is_not_trusted_in_running_tracker(self):
         profile={'mode':'chat','region':[.4,0,.6,1],'size':[600,500]};window=self.window()
         masks,full=application_masks([window],[],False,{window['key']:profile},{})
-        self.assertEqual(masks,[window['rect']])
+        self.assertEqual(masks,[])
 
 
 if __name__=='__main__':unittest.main()

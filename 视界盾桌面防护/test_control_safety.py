@@ -35,7 +35,11 @@ class ControlSafetyTests(unittest.TestCase):
         p.worker.poll.return_value=[]
         p.worker.process.is_alive.return_value=True
         p.overlay=Mock()
-        p.latest=Frame(1,self.now,{},np.zeros((64,64,3),dtype=np.uint8))
+        p.exclusion_verified=True
+        p.latest=Frame(1,self.now,{'left':0,'top':0,'width':64,'height':64},np.zeros((64,64,3),dtype=np.uint8))
+        inventory=patch('app_scope.window_inventory',return_value=[{'key':'test','handle':1,'pid':1,
+            'mode':'window','rect':(0,0,64,64),'client':(0,0,64,64)}])
+        inventory.start();self.addCleanup(inventory.stop)
         p.content.observe(p.latest)
         self.lines=[{'text':'ordinary','confidence':.99,'polygon':[[10,10],[50,10],[50,25],[10,25]]}]
         p.content.accept({'frame_id':1,'captured_at':self.now,'image':p.latest.image,
@@ -57,18 +61,43 @@ class ControlSafetyTests(unittest.TestCase):
         self.panel.latest.captured_at=self.now-2
         self.tick()
         self.assertTrue(self.panel.protecting)
-        self.assertTrue(self.panel.overlay.set_masks.call_args.kwargs['full'])
+        self.assertFalse(self.panel.overlay.set_masks.call_args.kwargs['full'])
+        self.assertEqual(self.panel.overlay.set_masks.call_args.args[0],[(0,0,64,64)])
 
     def test_stale_ocr_forces_full_protection_even_when_owner_safe(self):
         self.panel.last_ocr_finished=self.now-20
         self.tick()
         self.assertTrue(self.panel.protecting)
-        self.assertTrue(self.panel.overlay.set_masks.call_args.kwargs['full'])
+        self.assertFalse(self.panel.overlay.set_masks.call_args.kwargs['full'])
 
     def test_camera_risk_cannot_be_overridden_by_fresh_ocr(self):
         self.panel.camera.risk.return_value=(True,'检测到旁人')
         self.tick()
         self.assertTrue(self.panel.protecting)
+
+    def test_missing_selection_is_visible_even_while_owner_is_safe(self):
+        self.panel.app_profiles={'missing':{'mode':'window','binding':{'handle':99,'pid':99}}}
+        self.tick()
+        self.assertFalse(self.panel.protecting)
+        self.assertIn('已定位0/1',self.panel.status.text())
+        self.assertIn('不会扩大保护',self.panel.status.text())
+
+    def test_partial_scope_resolution_does_not_claim_all_scopes_are_ready(self):
+        self.panel.app_profiles={'test':{'mode':'window','binding':{'handle':1,'pid':1}},
+                                 'missing':{'mode':'window','binding':{'handle':99,'pid':99}}}
+        self.tick()
+        self.assertIn('已定位1/2',self.panel.status.text())
+
+    def test_pause_during_capture_probe_does_not_reopen_overlay_or_leak_capture(self):
+        self.panel.exclusion_verified=False
+        capture=Mock()
+        with patch('desktop_guard.ScreenCapture',return_value=capture), \
+                patch('capture_probe.verify_exclusion',side_effect=lambda *args:self.panel.pause()):
+            self.assertFalse(self.panel.verify_range_capture([(0,0,64,64)]))
+        self.assertIsNone(self.panel.overlay)
+        self.assertFalse(self.panel.probe_active)
+        self.assertFalse(self.panel.exclusion_verified)
+        capture.close.assert_called_once()
 
     def test_owner_pose_or_missing_face_does_not_emit_stranger_alert(self):
         self.panel.camera.risk.return_value=(True,'机主未确认')
@@ -134,8 +163,8 @@ class ControlSafetyTests(unittest.TestCase):
         with patch('traceback.print_exc'):
             self.tick()
         self.assertIsNotNone(self.panel.error)
-        self.assertTrue(self.panel.protecting)
-        self.assertTrue(self.panel.overlay.set_masks.call_args.kwargs['full'])
+        self.assertFalse(self.panel.protecting)
+        self.assertFalse(self.panel.overlay.set_masks.call_args.kwargs['full'])
         self.panel.overlay.setGeometry.assert_called_once()
         self.assertIn('尺寸已变化',self.panel.status.text())
 
@@ -170,7 +199,7 @@ class ControlSafetyTests(unittest.TestCase):
             'image':self.panel.latest.image,'lines':[],'elapsed_ms':20}]
         self.tick()
         self.assertTrue(self.panel.protecting)
-        self.assertTrue(self.panel.overlay.set_masks.call_args.kwargs['full'])
+        self.assertFalse(self.panel.overlay.set_masks.call_args.kwargs['full'])
 
     def test_empty_mode_suppresses_exception_masks_without_stopping_detection(self):
         self.panel.apply_preferences({'effect_text':''})

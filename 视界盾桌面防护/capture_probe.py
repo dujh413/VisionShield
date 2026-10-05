@@ -1,5 +1,6 @@
-"""在实际主屏显示临时色块，仅在内存检验遮罩是否进入截图。"""
+"""仅在已许可范围内显示小探针，内存检验遮罩排除，不显示整屏遮挡。"""
 import sys
+import math
 import numpy as np
 from PySide6.QtCore import QEventLoop, QTimer, Qt
 from PySide6.QtWidgets import QApplication, QWidget
@@ -11,24 +12,37 @@ def settle():
     loop.exec()
 
 
-def verify_exclusion(capture, overlay):
+def verify_exclusion(capture, overlay, rectangles=None):
+    screen = QApplication.primaryScreen()
+    geo = screen.geometry()
+    ratio = screen.devicePixelRatio()
+    candidates=rectangles if rectangles is not None else [(80*ratio,300*ratio,24*ratio,24*ratio)]
+    # 小字号文字行也必须可验证。向内取整，确保高DPI下探针不越界。
+    probe=None
+    for x,y,width,height in candidates:
+        left=math.ceil(x/ratio);top=math.ceil(y/ratio)
+        right=math.floor((x+width)/ratio);bottom=math.floor((y+height)/ratio)
+        if right-left>=4 and bottom-top>=4:
+            probe=(left,top)
+            break
+    if probe is None:return False
+    left,top=probe
     background = QWidget()
     background.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
     background.setAttribute(Qt.WA_ShowWithoutActivating)
     background.setStyleSheet('background-color: rgb(0,255,255);')
-    screen = QApplication.primaryScreen()
-    geo = screen.geometry()
-    background.setGeometry(geo.x()+80, geo.y()+300, 240, 120)
+    background.setGeometry(geo.x()+left,geo.y()+top,4,4)
+    box=(left*ratio,top*ratio,4*ratio,4*ratio)
     try:
-        # 启动校验期间持续整屏保护，不能为了截图探针暂时显示敏感桌面。
-        overlay.set_masks([], full=True)
+        # 风险已发生：验证期间也保持全部已确认范围被保护，不能只盖探针。
+        overlay.set_masks(candidates, full=False, padding=0)
+        overlay.show()
         background.show()
         overlay.raise_()
         settle()
-        ratio = screen.devicePixelRatio()
-        x, y = int(160*ratio), int(350*ratio)
-        before = capture.grab().image[y:y+10, x:x+10]
-        if before.shape != (10,10,3) or not np.all(before == [255,255,0]):
+        x, y = int(box[0]+box[2]/2)-1, int(box[1]+box[3]/2)-1
+        before = capture.grab().image[y:y+2, x:x+2]
+        if before.shape != (2,2,3) or not np.all(before == [255,255,0]):
             return False
         return True
     finally:
