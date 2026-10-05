@@ -5,8 +5,9 @@ import multiprocessing
 import sys
 import time
 
-from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtCore import QTimer, QSignalBlocker
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget
+from effect_controls import EffectControls
 
 from screen_capture import ScreenCapture, CaptureWorker, enable_dpi
 from sensitive_rules import rect_of
@@ -25,14 +26,13 @@ class ControlPanel(QWidget):
     def __init__(self, semantic=False, integrated=False, shield_enabled=True, effect_text="", diagnostics=False):
         super().__init__()
         self.shield_enabled = shield_enabled
-        self.effect_input = QLineEdit(effect_text)
-        self.effect_input.setMaxLength(128)
-        self.effect_input.setPlaceholderText('整数：盒式模糊半径；留空：不处理；其他字符：深色遮挡')
+        self.effect_input = EffectControls(effect_text,allow_off=True)
         self.effect_input.setAccessibleName('敏感内容处理设置')
         self.effect = parse_effect(effect_text)
         self.diagnostics_enabled = diagnostics
         self.diagnostics = None
         self.exclusion_verified = False
+        self.probe_active = False
         self.app_profiles = {}
         self.region_tracker = None
         self.region_status = '未设置追踪区域'
@@ -45,7 +45,7 @@ class ControlPanel(QWidget):
         self.detail.setWordWrap(True)
         start, pause, quit_button = QPushButton('启动 / 重试'), QPushButton('暂停防护'), QPushButton('退出')
         layout = QVBoxLayout(self)
-        for item in (self.status, QLabel("敏感内容处理设置（启动后生效）："), self.effect_input, self.detail, start, pause, quit_button):
+        for item in (self.status, QLabel("遮蔽效果（即时生效）："), self.effect_input, self.detail, start, pause, quit_button):
             layout.addWidget(item)
         start.clicked.connect(self.start)
         pause.clicked.connect(self.pause)
@@ -64,6 +64,7 @@ class ControlPanel(QWidget):
         self.timer = QTimer(self)
         self.timer.setInterval(20)
         self.timer.timeout.connect(self.tick)
+        self.effect_input.changed.connect(lambda text:self.apply_preferences({'effect_text':text}))
         self.root = desktop_root()
         self.latest = self.valid_image = None
         self.hits, self.last_capture = [], 0
@@ -93,17 +94,10 @@ class ControlPanel(QWidget):
                 raise RuntimeError('主屏物理尺寸与Qt坐标不一致，请重启软件或检查缩放')
             self.overlay = OverlayWindow(screen)
             exclude_capture(self)
-            # 采集排除必须先用本机探针成功验证，不能只依赖Win32返回值。
-            from capture_probe import verify_exclusion
-            if self.drawing_enabled():
-                if not verify_exclusion(self.capture, self.overlay):
-                    raise RuntimeError('遮罩实际采集排除验证失败；未启动自动模式，请更换捕获方案')
-                self.exclusion_verified = True
-                self.overlay.set_effect(effect)
-                self.overlay.set_masks([], full=True)
-            else:
-                self.overlay.set_effect(effect)
-                self.overlay.hide()
+            # 等拿到有效保护范围后在该范围内验证排除；不制造整屏启动黑帧。
+            self.exclusion_verified = False
+            self.overlay.set_effect(effect)
+            self.overlay.hide()
             self.capture.close()
             self.capture=CaptureWorker()
             if self.isVisible():
@@ -130,7 +124,7 @@ class ControlPanel(QWidget):
             self.diagnostics = PerformanceLog(records/'performance'/f'{datetime.now():%Y%m%d_%H%M%S_%f}') if self.diagnostics_enabled else None
             self.last_log_state = None
             self.timer.start()
-            self.status.setText('启动中：初始化本地OCR；'+('未确认安全前临时全屏保护。' if self.drawing_enabled() else '仅检测与提示，不遮蔽屏幕。'))
+            self.status.setText('启动中：初始化本地OCR；'+('等待有效保护范围，不扩大到范围之外。' if self.drawing_enabled() else '仅检测与提示，不遮蔽屏幕。'))
         except Exception as error:
             self.pause()
             self.status.setText(f'未启动：{error}')
@@ -138,43 +132,51 @@ class ControlPanel(QWidget):
     def apply_preferences(self, value):
         from app_scope import valid_profiles
         if isinstance(value.get('app_profiles'), dict):
-            self.app_profiles = valid_profiles(value['app_profiles'])
+            new_profiles=valid_profiles(value['app_profiles'])
+            if new_profiles!=self.app_profiles and self.overlay is not None:
+                self.overlay.set_masks([],full=False)
+            self.app_profiles = new_profiles
         enabled = value.get('shield_enabled', self.shield_enabled)
         if not isinstance(enabled, bool):
             enabled = self.shield_enabled
         text = value.get('effect_text')
         effect = parse_effect(text) if isinstance(text,str) and len(text)<=128 else self.effect
         drawing = enabled and effect.mode != 'off'
-        if drawing and self.overlay is not None and not self.exclusion_verified:
-            from capture_probe import verify_exclusion
-            capture = ScreenCapture()
-            previous = self.effect
-            try:
-                self.overlay.set_effect(parse_effect('遮挡'))
-                self.overlay.show()
-                if not verify_exclusion(capture, self.overlay):
-                    raise RuntimeError('遮罩采集排除验证失败')
-                self.exclusion_verified = True
-            except Exception as error:
-                self.overlay.set_effect(previous)
-                self.overlay.hide()
-                self.error = str(error)
-                return
-            finally:
-                capture.close()
         changed = enabled != self.shield_enabled or effect != self.effect
         self.shield_enabled, self.effect = enabled, effect
         if isinstance(text,str) and len(text)<=128:
-            self.effect_input.setText(text)
+            with QSignalBlocker(self.effect_input):self.effect_input.setText(text)
         if changed and self.overlay is not None:
             self.overlay.set_effect(effect)
-            if drawing:
-                self.overlay.set_masks([], full=True)
-                self.overlay.show()
-            else:
+            if not drawing:
                 self.overlay.set_masks([], full=False)
                 self.overlay.hide()
                 self.protecting = False
+
+    def verify_range_capture(self, rectangles):
+        if self.exclusion_verified:return True
+        from capture_probe import verify_exclusion
+        self.probe_active=True
+        capture=None;overlay=self.overlay
+        try:
+            capture=ScreenCapture()
+            overlay.set_effect(parse_effect('遮挡'))
+            if not verify_exclusion(capture,overlay,rectangles):
+                raise RuntimeError('当前范围遮罩采集排除验证失败')
+            if self.overlay is not overlay:return False
+            self.exclusion_verified=True
+            return True
+        except Exception as error:
+            self.error=str(error)
+            overlay.hide()
+            return False
+        finally:
+            try:
+                if self.overlay is overlay:overlay.set_effect(self.effect)
+            finally:
+                try:
+                    if capture:capture.close()
+                finally:self.probe_active=False
 
     def pause(self):
         self.timer.stop()
@@ -214,6 +216,7 @@ class ControlPanel(QWidget):
         return not failures
 
     def tick(self):
+        if self.probe_active:return
         try:
             callback_started = time.monotonic()
             now = time.monotonic()
@@ -223,7 +226,7 @@ class ControlPanel(QWidget):
             confirmed_risk = (bool(sensor.last and sensor.last.get('stranger_detected', False))
                               if self.integrated else risk)
             if risk and confirmed_risk and not self.last_risk and now-self.last_alert_at>=10:
-                self.alert_message = reason+('，已启用隐私遮蔽。' if self.drawing_enabled() else '，遮蔽已关闭，请注意屏幕内容。')
+                self.alert_message = reason+('，已请求指定范围保护，请留意范围状态。' if self.drawing_enabled() else '，遮蔽已关闭，请注意屏幕内容。')
                 self.last_alert_at = now
             self.last_risk = confirmed_risk
             ocr_ms = None
@@ -288,26 +291,35 @@ class ControlPanel(QWidget):
             rectangles = view["rectangles"] if protecting else []
             scoped = False
             if self.latest is not None and self.latest.monitor_rect:
-                from app_scope import application_masks, window_inventory
+                from app_scope import application_masks, window_inventory, profile_status
                 windows = window_inventory(self.latest.monitor_rect)
                 if self.region_tracker is None:
                     from region_tracker import RegionTracker
                     self.region_tracker = RegionTracker()
                 scopes=self.region_tracker.resolve(self.app_profiles,windows,self.latest.image,
                     (self.latest.monitor_rect['left'],self.latest.monitor_rect['top']),now)
-                self.region_status = ('区域特征追踪中' if scopes and all(s['rect'] is not None for s in scopes.values()) else
-                                      '区域等待或失配，所属窗口保护' if any(p['mode']=='tracked' for p in self.app_profiles.values()) else '默认应用策略')
+                self.region_status = profile_status(self.app_profiles,windows,scopes)
                 if protecting:
                     rectangles, full = application_masks(windows, rectangles, full, self.app_profiles, resolved=scopes)
                     scoped = bool(windows)
-            self.overlay.set_masks(rectangles, full=full, image=self.latest.image if self.latest is not None else None, padding=0 if scoped else 8)
-            state = '异常保护' if self.error else '临时全屏保护' if full else '应用区域保护' if protecting else '正常显示'
+            else:
+                rectangles=[]
+                self.region_status='等待桌面采集，尚未确认保护范围'
+            # 所有运行路径只绘制已确认的应用/选区；失配和异常不扩展到整屏。
+            full=False
+            if protecting and rectangles and not self.verify_range_capture(rectangles):rectangles=[]
+            if self.overlay is None:return  # 探针事件循环中用户可暂停/退出。
+            self.protecting=protecting and bool(rectangles)
+            self.overlay.set_masks(rectangles, full=False, image=self.latest.image if self.latest is not None else None, padding=0)
+            if rectangles and self.protecting:self.overlay.show()
+            elif self.overlay.isVisible():self.overlay.hide()
+            state = '检测异常 · 保持指定范围策略' if self.error else '应用区域保护' if self.protecting else '保护范围暂不可用' if protecting else '正常显示'
             if not self.drawing_enabled():
                 state = '仅检测与提示（不遮蔽）' + (' · 检测异常' if self.error else ' · 存在风险' if risk_active else '')
             self.status.setText(f'{state} · {reason}\nOCR：'+('异常' if self.error else '已就绪' if self.ready else '加载中'))
             self.detail.setText(f'有效敏感行：{len(self.hits)}；{self.effect.description}；范围：主显示器\n' +
                                 ('实验语义已启用（小样本，需独立评估）' if self.semantic else '规则模式；尚不能覆盖全部私人聊天语义'))
-            if protecting:self.status.setText(self.status.text()+'\n'+self.region_status)
+            if protecting or self.app_profiles:self.status.setText(self.status.text()+'\n'+self.region_status)
             summary = (state, len(self.hits), tuple(sorted({c for h in self.hits for c in h['categories']})))
             if summary != self.last_log_state or ocr_ms is not None:
                 self.writer.writerow([round(now-self.started,3), state,
@@ -333,11 +345,12 @@ class ControlPanel(QWidget):
         except Exception as error:
             # 保留可点击的控制面板；异常时不静默恢复内容。
             self.error = self.error or '控制流程异常：'+type(error).__name__
-            self.protecting = self.drawing_enabled()
+            self.protecting = False
             if self.overlay:
-                self.overlay.set_masks([], full=self.drawing_enabled())
+                self.overlay.set_masks([], full=False)
+                self.overlay.hide()
             self.timer.stop()
-            effect = '已临时全屏保护' if self.drawing_enabled() else '遮蔽已关闭'
+            effect = '无法确认范围，已暂停遮蔽' if self.drawing_enabled() else '遮蔽已关闭'
             self.status.setText(f'运行异常，{effect}：{self.error}；可暂停或退出。')
             import traceback
             traceback.print_exc()

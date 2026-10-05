@@ -39,6 +39,7 @@ class OverlayWindow(QWidget):
         self.mask_image = None
         self._renderer = None
         self._fallback_boxes = []
+        self._mask_error = None
         self._qimages = {}
         self._closed = False
         self._last_paint_ms = None
@@ -65,7 +66,7 @@ class OverlayWindow(QWidget):
 
     @property
     def last_render_error(self):
-        return self._renderer.last_error if self._renderer is not None else None
+        return self._mask_error or (self._renderer.last_error if self._renderer is not None else None)
 
     @property
     def blur_backend(self):
@@ -95,14 +96,25 @@ class OverlayWindow(QWidget):
     def screen_geometry_changed(self, geometry):
         self.setGeometry(geometry)
         self._release_renderer()
-        self.set_masks([], full=True)
+        # Screen scaling invalidates physical coordinates. Wait for a fresh
+        # controller decision instead of inventing a full-screen black mask.
+        self.set_masks([], full=False)
 
     def set_effect(self, effect):
         if effect.mode not in ('off', 'block', 'blur'):
             raise ValueError('invalid mask effect')
-        self._release_renderer()
+        if effect == self.effect:
+            return
+        rectangles, full, padding, image = (self.rectangles, self.full,
+                                            self.padding, self.mask_image)
+        if self.effect.mode == 'blur' and effect.mode == 'blur' and self._renderer is not None:
+            self._renderer.set_radius(effect.radius)
+        else:
+            self._release_renderer()
         self.effect = effect
-        self.set_masks([], full=False)
+        # A live strength/mode change keeps exactly the current scope. Clearing
+        # it first causes a transparent frame; expanding it causes black flashes.
+        self.set_masks(rectangles, full=full, image=image, padding=padding)
 
     def set_masks(self, rectangles, full=False, image=None, padding=8, frame_image=None):
         if self._closed:
@@ -115,18 +127,22 @@ class OverlayWindow(QWidget):
         self.mask_image = frame_image
         self.padding = padding
         self.rectangles, self.full = list(rectangles), bool(full)
+        self._mask_error = None
         if self.effect.mode == 'off':
+            self.mask_image = None
             self.rectangles, self.full = [], False
             if self._renderer is not None:
                 self._renderer.clear()
             self.blurs, self._fallback_boxes, self._qimages = [], [], {}
         else:
+            # Derive protection bounds from the window, independently of a bad
+            # or missing capture. Failure must never enlarge a selected scope.
+            ratio = self.devicePixelRatioF()
+            shape = (round(self.height()*ratio), round(self.width()*ratio))
+            boxes = ((0, 0, int(shape[1]), int(shape[0])),) if self.full else ()
             try:
-                ratio = self.devicePixelRatioF()
-                shape = (frame_image.shape if frame_image is not None else
-                         (round(self.height()*ratio), round(self.width()*ratio)))
-                boxes = (((0, 0, int(shape[1]), int(shape[0])),) if self.full else
-                         mask_crops(self.rectangles, shape, padding))
+                if not self.full:
+                    boxes = mask_crops(self.rectangles, shape, padding)
                 if not boxes or self.effect.mode != 'blur' or frame_image is None:
                     if self._renderer is not None:
                         self._renderer.clear()
@@ -148,10 +164,20 @@ class OverlayWindow(QWidget):
                     blurs.append((box, qimage))
                 self.blurs, self._qimages = blurs, qimages
                 self._fallback_boxes = list(pending)
-            except Exception:
-                # Invalid source/geometry never reveals content during protection.
-                self.full = True
+            except Exception as error:
+                self._mask_error = type(error).__name__
+                # Invalid source/rendering retains only valid requested boxes.
+                # An invalid rectangle cannot justify covering unrelated pixels.
+                if not self.full:
+                    valid = []
+                    for rectangle in self.rectangles:
+                        try:
+                            valid.extend(mask_crops([rectangle], shape, padding))
+                        except (TypeError, ValueError, OverflowError):
+                            continue
+                    boxes = tuple(sorted(set(valid)))
                 self.blurs, self._fallback_boxes, self._qimages = [], [], {}
+                self._fallback_boxes = list(boxes)
                 if self._renderer is not None:
                     self._renderer.clear()
         current = (self.rectangles, self.full, self.padding,
@@ -162,8 +188,11 @@ class OverlayWindow(QWidget):
 
     def _release_renderer(self):
         self.mask_image = None
-        self.blurs, self._qimages, self._fallback_boxes = [], {}, []
-        self.full = self.effect.mode != 'off'
+        # During a slow/failed release, preserve only the already validated
+        # physical scope as opaque placeholders; never turn it into full-screen.
+        self._fallback_boxes = list(dict.fromkeys(
+            [box for box, _ in self.blurs] + self._fallback_boxes))
+        self.blurs, self._qimages = [], {}
         if self._renderer is not None:
             try:
                 self._renderer.close()
@@ -181,7 +210,7 @@ class OverlayWindow(QWidget):
     def hideEvent(self, event):
         self._release_renderer()
         # A reused protected overlay waits for a fresh controller decision.
-        self.full = self.effect.mode != 'off'
+        self.rectangles, self.full, self._fallback_boxes = [], False, []
         super().hideEvent(event)
 
     def closeEvent(self, event):
@@ -193,6 +222,11 @@ class OverlayWindow(QWidget):
         started = time.perf_counter()
         painter = QPainter(self)
         try:
+            # One backing-store paint replaces the previous mask atomically.
+            # Explicitly erase vacated regions after a window/selection moves.
+            painter.setCompositionMode(QPainter.CompositionMode_Source)
+            painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
+            painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(20, 24, 32, 255))
             if self.effect.mode == 'off':

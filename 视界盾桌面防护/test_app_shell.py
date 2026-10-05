@@ -8,7 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 from PySide6.QtCore import QObject, QProcess, QSettings, QTimer, Signal
-from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QDialogButtonBox, QPushButton
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, QPushButton, QScrollArea
 from app_shell import Shell, Backend
 
 
@@ -85,30 +86,179 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(self.backend.starts, 0)
         self.assertEqual(self.panel.state, 'paused')
 
-    def test_effect_text_is_committed_only_when_enabling_and_saved_for_restart(self):
+    def test_slider_and_mode_apply_live_and_save_for_restart(self):
         self.panel.effect_input.setText('８')
         self.assertFalse(hasattr(self.backend, 'effect_text'))
         with patch('overlay_window.exclude_capture'):
             self.panel.toggle_guard()
-        self.assertEqual(self.backend.effect_text, '８')
-        self.panel.effect_input.setText('遮挡')
-        self.panel.effect_checks['shield_enabled'].setChecked(False)
-        self.assertEqual(self.backend.effect_text, '８')
+        self.assertEqual(self.backend.effect_text, '8')
         self.backend.changed.emit('running', '虚构状态')
-        self.panel.toggle_guard()
-        with patch('overlay_window.exclude_capture'):
-            self.panel.toggle_guard()
+        self.backend.send_preferences=Mock()
+        self.panel.effect_input.slider.setValue(35)
+        QTest.qWait(150)
+        self.assertEqual(self.backend.effect_text, '35')
+        self.backend.send_preferences.assert_called_once()
+        self.panel.effect_input.setText('遮挡')
+        QTest.qWait(150)
         self.assertEqual(self.backend.effect_text, '遮挡')
         reopened=QSettings(self.path,QSettings.IniFormat)
         self.assertEqual(reopened.value('effect_text'), '遮挡')
+        self.assertFalse(self.panel.findChildren(QLineEdit))
 
-    def test_empty_committed_mode_reports_detection_only(self):
-        self.panel.effect_input.setText('  ')
+    def test_default_enabled_shield_has_actual_blur_and_off_is_explicit(self):
         with patch('overlay_window.exclude_capture'):
             self.panel.toggle_guard()
         self.backend.changed.emit('running', '虚构状态')
+        self.assertEqual(self.backend.effect_text, '24')
+        self.assertNotIn('不遮蔽', self.panel.status.text())
+        self.panel.effect_checks['shield_enabled'].setChecked(False)
         self.assertIn('不遮蔽', self.panel.status.text())
-        self.assertEqual(self.backend.effect_text, '  ')
+        self.assertFalse(self.panel.effect_input.slider.isEnabled())
+        self.assertFalse(self.panel.effect_input.mode.isEnabled())
+
+    def test_old_empty_effect_migrates_to_blur_without_loading_models(self):
+        self.settings.setValue('effect_text','')
+        extra=Shell(self.settings,FakeBackend(),tray_available=False)
+        try:
+            self.assertTrue(extra.effect_checks['shield_enabled'].isChecked())
+            self.assertEqual(extra.effect_input.to_text(),'24')
+        finally:
+            extra.hide();extra.deleteLater();self.app.processEvents()
+
+    def test_main_window_leaves_enough_height_for_slider_and_labels(self):
+        self.panel.show();self.app.processEvents()
+        self.assertGreaterEqual(self.panel.effect_input.height(),self.panel.effect_input.minimumSizeHint().height())
+        self.assertGreater(self.panel.effect_input.slider.width(),100)
+        self.assertTrue(self.panel.rect().contains(self.panel.toggle.geometry()))
+        self.assertTrue(self.panel.rect().contains(self.panel.scope_summary.geometry()))
+
+    def test_settings_scroll_leaves_save_and_cancel_visible(self):
+        def inspect_dialog():
+            dialog=self.app.activeModalWidget();self.app.processEvents()
+            self.assertLessEqual(dialog.height(),self.panel.screen().availableGeometry().height())
+            scroll=dialog.findChild(QScrollArea)
+            self.assertIsNotNone(scroll)
+            scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
+            self.app.processEvents()
+            buttons=dialog.findChild(QDialogButtonBox)
+            for button in buttons.buttons():
+                self.assertTrue(button.isVisibleTo(dialog))
+                self.assertTrue(dialog.rect().contains(button.mapTo(dialog,button.rect().bottomRight())))
+            dialog.reject()
+        QTimer.singleShot(0,inspect_dialog)
+        self.panel.open_settings()
+
+    def test_status_updates_do_not_repeatedly_raise_control_window(self):
+        self.panel.show()
+        with patch.object(self.panel,'raise_') as raise_window:
+            for _ in range(5):
+                self.backend.changed.emit('running','匿名状态')
+            raise_window.assert_not_called()
+
+    def test_scope_settings_explain_local_boundaries_and_disable_while_running(self):
+        self.panel.state='running'
+        descriptions=[]
+        buttons=[]
+        def inspect_dialog():
+            dialog=self.app.activeModalWidget()
+            descriptions.extend(label.text() for label in dialog.findChildren(QLabel))
+            buttons.extend(button for button in dialog.findChildren(QPushButton)
+                           if button.text().startswith(('局部保护','整窗保护','清除所选范围')))
+            self.assertEqual(len(buttons),3)
+            self.assertTrue(all(not button.isEnabled() for button in buttons))
+            dialog.reject()
+        QTimer.singleShot(0,inspect_dialog)
+        with patch('overlay_window.exclude_capture') as exclusion:
+            self.panel.open_settings()
+        exclusion.assert_called_once()
+        text='\n'.join(descriptions)
+        self.assertIn('其他区域保持清晰',text)
+        self.assertIn('暂停该选区遮蔽',text)
+        self.assertIn('保护该窗口的全部可见内容',text)
+
+    def test_configured_scope_summary_and_reset_update_immediately(self):
+        self.panel.save_profiles({'app':{'mode':'window'}})
+        self.assertIn('0 处局部、1 个整窗',self.panel.scope_summary.text())
+        self.panel.save_profiles({})
+        self.assertIn('自动按应用与内容保护',self.panel.scope_summary.text())
+
+    def test_quitting_immediately_after_slider_change_preserves_latest_choice(self):
+        self.panel.effect_input.slider.setValue(61)
+        self.assertTrue(self.panel.effect_update_timer.isActive())
+        with patch.object(self.app,'quit') as quit_app:
+            self.panel.quit_app()
+        self.assertFalse(self.panel.effect_update_timer.isActive())
+        reopened=QSettings(self.path,QSettings.IniFormat)
+        self.assertEqual(reopened.value('effect_text'),'61')
+        quit_app.assert_called_once()
+
+    def test_dark_style_preserves_previous_blur_strength_after_restart(self):
+        self.panel.effect_input.slider.setValue(53)
+        self.panel.effect_input.setText('遮挡')
+        self.panel.apply_effect_text()
+        reopened=QSettings(self.path,QSettings.IniFormat)
+        extra=Shell(reopened,FakeBackend(),tray_available=False)
+        try:
+            self.assertEqual(extra.effect_input.mode.currentData(),'block')
+            extra.effect_input.mode.setCurrentIndex(extra.effect_input.mode.findData('blur'))
+            self.assertEqual(extra.effect_input.to_text(),'53')
+        finally:
+            extra.hide();extra.deleteLater();self.app.processEvents()
+
+    def test_saved_radius_does_not_override_legacy_numeric_effect(self):
+        self.settings.setValue('effect_text','８')
+        self.settings.setValue('blur_radius',53)
+        extra=Shell(self.settings,FakeBackend(),tray_available=False)
+        try:self.assertEqual(extra.effect_input.to_text(),'8')
+        finally:extra.hide();extra.deleteLater();self.app.processEvents()
+
+    def test_scope_buttons_save_pending_form_before_leaving_settings(self):
+        for prefix,whole in (('局部保护',False),('整窗保护',True)):
+            with self.subTest(prefix=prefix):
+                self.settings.setValue('shield_enabled',True)
+                self.settings.setValue('auto_enable',False)
+                def choose_dialog():
+                    dialog=self.app.activeModalWidget()
+                    dialog.findChild(QCheckBox,'shield_enabled').setChecked(False)
+                    for checkbox in dialog.findChildren(QCheckBox):
+                        if checkbox.text()=='打开软件后自动启用防护':checkbox.setChecked(True)
+                    next(button for button in dialog.findChildren(QPushButton)
+                         if button.text().startswith(prefix)).click()
+                QTimer.singleShot(0,choose_dialog)
+                with patch.object(self.panel,'calibrate_scope') as choose:
+                    self.panel.open_settings()
+                choose.assert_called_once_with(whole)
+                reopened=QSettings(self.path,QSettings.IniFormat)
+                self.assertFalse(reopened.value('shield_enabled',True,type=bool))
+                self.assertTrue(reopened.value('auto_enable',False,type=bool))
+
+    def test_clear_scope_saves_form_immediately_and_cancel_only_discards_later_edits(self):
+        self.panel.save_profiles({'app':{'mode':'window'}})
+        def clear_dialog():
+            dialog=self.app.activeModalWidget()
+            checkbox=dialog.findChild(QCheckBox,'shield_enabled')
+            checkbox.setChecked(False)
+            next(button for button in dialog.findChildren(QPushButton)
+                 if button.text().startswith('清除所选范围')).click()
+            checkbox.setChecked(True)
+            dialog.reject()
+        QTimer.singleShot(0,clear_dialog)
+        self.panel.open_settings()
+        reopened=QSettings(self.path,QSettings.IniFormat)
+        self.assertFalse(reopened.value('shield_enabled',True,type=bool))
+        self.assertEqual(json.loads(reopened.value('app_profiles')), {})
+        self.assertEqual(self.panel.load_profiles(),{})
+
+    def test_reselecting_same_application_replaces_previous_scope(self):
+        self.panel.save_profiles({'app':{'mode':'tracked','anchor':{'type':'visual'}}})
+        picker=Mock()
+        picker.exec.return_value=QDialog.Accepted
+        picker.result_profile=('app',{'mode':'window','binding':{'handle':44,'pid':55}})
+        with patch('scope_picker.ScopePicker',return_value=picker):
+            self.panel.calibrate_scope(True)
+        self.assertEqual(len(self.panel.load_profiles()),1)
+        self.assertEqual(self.panel.load_profiles()['app']['mode'],'window')
+        self.assertIn('仅保护刚才点击的窗口',self.panel.detail.text())
 
     def test_live_preferences_do_not_send_uncommitted_edits(self):
         backend=Backend()
@@ -153,14 +303,16 @@ class ShellTests(unittest.TestCase):
 
     def test_popup_without_tray_is_nonmodal_and_reused(self):
         self.settings.setValue('sound_enabled', False)
-        self.panel.remind_owner('第一次虚构风险')
-        popup = self.panel.reminder
-        self.assertTrue(popup.isVisible())
-        self.assertFalse(popup.isModal())
-        self.panel.remind_owner('第二次虚构风险')
-        self.assertIs(self.panel.reminder, popup)
-        self.assertEqual(self.panel.reminder_text.text(), '第二次虚构风险')
-        popup.hide()
+        with patch('overlay_window.exclude_capture') as exclusion:
+            self.panel.remind_owner('第一次虚构风险')
+            popup = self.panel.reminder
+            self.assertTrue(popup.isVisible())
+            self.assertFalse(popup.isModal())
+            self.panel.remind_owner('第二次虚构风险')
+            self.assertIs(self.panel.reminder, popup)
+            self.assertEqual(self.panel.reminder_text.text(), '第二次虚构风险')
+            popup.hide()
+            exclusion.assert_called_once_with(popup)
 
     def test_effect_settings_persist_and_apply_next_session(self):
         def save_dialog():

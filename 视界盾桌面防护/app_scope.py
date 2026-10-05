@@ -33,6 +33,9 @@ def valid_profiles(value):
             continue
         if profile.get('mode')=='window':
             result[key]={'mode':'window'}
+            binding=profile.get('binding')
+            if isinstance(binding,dict) and all(type(binding.get(k)) is int and 0<binding[k]<2**64 for k in ('handle','pid')):
+                result[key]['binding']={'handle':binding['handle'],'pid':binding['pid']}
         elif profile.get('mode')=='tracked':
             from region_features import valid_features
             anchor=profile.get('anchor');binding=profile.get('binding')
@@ -75,25 +78,50 @@ def stored_profiles(profiles):
     return result
 
 
+def profile_status(profiles, windows, resolved):
+    if not profiles:
+        return '默认应用策略'
+    available=0
+    for key,profile in profiles.items():
+        candidates=[win for win in windows if win['key']==key and win['mode']!='ignore']
+        bound=profile.get('binding')
+        window=(next((win for win in candidates if win['handle']==bound['handle'] and win['pid']==bound['pid']),None)
+                if bound else candidates[0] if len(candidates)==1 else None)
+        if window is None:continue
+        if profile['mode']=='window':available+=1
+        elif profile['mode']=='tracked':
+            match=resolved.get(key)
+            if match and match['handle']==window['handle'] and match['rect'] is not None and intersect(match['rect'],window['rect']):
+                available+=1
+    status=f'已定位{available}/{len(profiles)}个指定范围'
+    if available<len(profiles):status+='；未定位的范围暂停遮蔽，请暂停后重新选择；不会扩大保护'
+    return status
+
+
 def application_masks(windows, rectangles, uncertain, profiles=None, resolved=None):
     profiles=valid_profiles(profiles or {})
     if not windows:
-        # 枚举失败或未能取得应用边界时不能以空结果恢复。
-        return rectangles, bool(uncertain)
+        # 无法确认边界时不越过用户范围；状态栏提示范围暂不可用。
+        return [], False
     masks=[];covers=[]
+    excluded=[win['rect'] for win in windows if win.get('own_ui',False)]
     for window in windows:  # EnumWindows顺序：前景到背景。
         rect=window['rect'];mode=window['mode'];profile=profiles.get(window['key'])
+        scope_valid=True
+        if profiles and mode!='ignore':
+            candidates=[win for win in windows if win['key']==window['key'] and win['mode']!='ignore']
+            bound=profile.get('binding') if profile else None
+            scope_valid=bool(profile and (bound and window.get('handle')==bound['handle'] and window.get('pid')==bound['pid']
+                                         or not bound and len(candidates)==1))
         if profile and mode != 'ignore':
             mode=profile['mode']
         scope=rect
         if mode=='tracked':
             match=(resolved or {}).get(window['key'])
             if match and match['handle']==window['handle'] and match['rect'] is not None:
-                scope=intersect(match['rect'],rect) or rect
-            elif profile.get('binding') and profile['binding']['handle']!=window['handle']:
-                mode=window['mode']
-            # 同一应用的另一窗口不继承选区；目标失配时整窗保护。
-            else:scope=rect
+                scope=intersect(match['rect'],rect)
+                scope_valid=scope_valid and scope is not None
+            else:scope_valid=False
         if mode=='chat':
             scope=rect
             client=window['client']
@@ -103,11 +131,14 @@ def application_masks(windows, rectangles, uncertain, profiles=None, resolved=No
                 if abs(cw-expected[0])<=max(2,expected[0]*.02) and abs(ch-expected[1])<=max(2,expected[1]*.02):
                     x,y,width,height=profile['region']
                     scope=(client[0]+x*cw,client[1]+y*ch,width*cw,height*ch)
+                else:scope_valid=False
+            elif profile and profile.get('mode')=='chat':scope_valid=False
             # 无有效校准时整应用保护，不猜对话区域。
-        selected=([scope] if mode in ('window','chat','tracked') else
+        selected=([] if not scope_valid else [scope] if mode in ('window','chat','tracked') else
                   [rect] if uncertain and mode!='ignore' else
                   [clip for candidate in rectangles if (clip:=intersect(candidate,rect))] if mode!='ignore' else [])
-        for cover in covers:
+        # 程序自身始终保持可见，不能依赖Qt置顶窗口的瞬时排序。
+        for cover in covers+excluded:
             selected=[part for candidate in selected for part in subtract(candidate,cover)]
         masks.extend(selected)
         covers.append(rect)
@@ -158,7 +189,7 @@ def window_inventory(monitor, excluded_pids=None):
             user.GetClientRect(handle,ctypes.byref(client));user.ClientToScreen(handle,ctypes.byref(origin))
             mode=('ignore' if pid.value in excluded or cls.value in ('Progman','WorkerW','Shell_TrayWnd','Shell_SecondaryTrayWnd') else
                   'chat' if exe in CHAT else 'window' if exe in WHOLE else 'lines')
-            result.append({'handle':int(handle),'pid':pid.value,'key':exe+'|'+cls.value,'mode':mode,'rect':clipped,
+            result.append({'handle':int(handle),'pid':pid.value,'key':exe+'|'+cls.value,'mode':mode,'rect':clipped,'own_ui':pid.value in excluded,
                            'client':(origin.x-monitor['left'],origin.y-monitor['top'],client.right,client.bottom)})
         except (OSError,ValueError):pass
         return True

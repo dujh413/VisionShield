@@ -9,8 +9,10 @@ from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox,
-                              QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
+                              QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea,
                               QSystemTrayIcon, QVBoxLayout, QWidget)
+
+from effect_controls import DEFAULT_BLUR_RADIUS, EffectControls
 
 
 class Backend(QObject):
@@ -30,7 +32,7 @@ class Backend(QObject):
         self.buffer = b''
         self.stopping = False
         self.shield_enabled = True
-        self.effect_text = ""
+        self.effect_text = str(DEFAULT_BLUR_RADIUS)
         self.server = QLocalServer(self)
         self.server.newConnection.connect(self.accept_service)
         self.peer = None
@@ -280,7 +282,7 @@ class Shell(QWidget):
         layout.addWidget(self.detail)
         layout.addStretch()
         self.effect_checks = {}
-        for key, text in (('shield_enabled','遮蔽范围模糊化'),
+        for key, text in (('shield_enabled','风险时遮蔽保护范围'),
                           ('popup_enabled','检测陌生人后弹窗'),
                           ('sound_enabled','检测陌生人后音效')):
             check = QCheckBox(text)
@@ -288,12 +290,21 @@ class Shell(QWidget):
             check.toggled.connect(lambda value, name=key: self.change_effect(name, value))
             self.effect_checks[key] = check
             layout.addWidget(check)
-        self.effect_input = QLineEdit(str(self.settings.value('effect_text', '')))
-        self.effect_input.setMaxLength(128)
-        self.effect_input.setAccessibleName('敏感内容处理设置')
-        self.effect_input.setPlaceholderText('整数：模糊半径；留空：不处理；其他字符：深色遮挡')
-        layout.addWidget(QLabel('敏感内容处理设置（启用时生效）'))
+        stored_effect = str(self.settings.value('effect_text', ''))
+        self.effect_input = EffectControls(stored_effect or str(DEFAULT_BLUR_RADIUS))
+        if self.effect_input.mode.currentData() == 'block':
+            self.effect_input.slider.setValue(self.settings.value('blur_radius', DEFAULT_BLUR_RADIUS, type=int))
+        self.effect_input.set_shield_enabled(self.effect_checks['shield_enabled'].isChecked())
+        self.effect_update_timer = QTimer(self)
+        self.effect_update_timer.setSingleShot(True)
+        self.effect_update_timer.timeout.connect(self.apply_effect_text)
+        self.effect_input.changed.connect(lambda _: self.effect_update_timer.start(100))
         layout.addWidget(self.effect_input)
+        self.scope_summary = QLabel()
+        self.scope_summary.setObjectName('caption')
+        self.scope_summary.setWordWrap(True)
+        self.refresh_scope_summary()
+        layout.addWidget(self.scope_summary)
         layout.addWidget(self.toggle)
         layout.addWidget(separator())
         layout.addLayout(actions)
@@ -316,6 +327,8 @@ class Shell(QWidget):
         if hasattr(self.backend,'alerted'):
             self.backend.alerted.connect(self.remind_owner)
         self.set_state('paused')
+        self.setMinimumHeight(self.minimumSizeHint().height())
+        self.resize(440, max(560, self.sizeHint().height()))
 
     def change_effect(self, key, value):
         self.settings.setValue(key, bool(value))
@@ -325,10 +338,32 @@ class Shell(QWidget):
             self.reminder_timer.stop()
         if key == 'shield_enabled':
             self.backend.shield_enabled = bool(value)
+            if hasattr(self, 'effect_input'):
+                self.effect_input.set_shield_enabled(value)
             if hasattr(self.backend, 'send_preferences'):
                 self.backend.send_preferences()
         if self.state == 'running':
             self.set_state(self.state, self.detail.text())
+
+    def apply_effect_text(self):
+        self.effect_update_timer.stop()
+        text = self.effect_input.to_text()
+        self.settings.setValue('effect_text', text)
+        self.settings.setValue('blur_radius', self.effect_input.slider.value())
+        self.settings.sync()
+        self.backend.effect_text = text
+        if hasattr(self.backend, 'send_preferences'):
+            self.backend.send_preferences()
+        if self.state == 'running':
+            self.set_state(self.state, self.detail.text())
+
+    def refresh_scope_summary(self):
+        profiles = self.load_profiles()
+        local = sum(profile['mode'] != 'window' for profile in profiles.values())
+        whole = len(profiles)-local
+        self.scope_summary.setText(
+            f'保护范围：已选 {local} 处局部、{whole} 个整窗，仅处理有效范围。无法定位时需重新选择。' if profiles else
+            '保护范围：自动按应用与内容保护。需要限定范围时，请到设置中选择局部或整窗。')
 
     def load_profiles(self):
         from app_scope import valid_profiles
@@ -373,9 +408,7 @@ class Shell(QWidget):
                 return
             self.backend.shield_enabled = self.settings.value('shield_enabled', True, type=bool)
             self.backend.app_profiles = self.load_profiles()
-            self.backend.effect_text = self.effect_input.text()
-            self.settings.setValue('effect_text', self.backend.effect_text)
-            self.settings.sync()
+            self.apply_effect_text()
             self.set_state('starting', '正在加载本地防护服务。')
             self.backend.start()
         elif self.state in ('running', 'error'):
@@ -385,8 +418,6 @@ class Shell(QWidget):
     def backend_changed(self, state, detail):
         if self.state != 'stopping' and not self.quitting:
             self.set_state(state, detail)
-            if self.isVisible():
-                self.raise_()
 
     def backend_stopped(self):
         if self.quitting:
@@ -415,6 +446,8 @@ class Shell(QWidget):
             layout = QVBoxLayout(self.reminder)
             layout.addWidget(self.reminder_text)
             self.reminder.resize(320, 100)
+            from overlay_window import exclude_capture
+            exclude_capture(self.reminder)
             self.reminder_timer = QTimer(self.reminder)
             self.reminder_timer.setSingleShot(True)
             self.reminder_timer.timeout.connect(self.reminder.hide)
@@ -433,10 +466,23 @@ class Shell(QWidget):
 
     def open_settings(self):
         dialog = QDialog(self)
-        dialog.setWindowTitle('设置')
-        dialog.setMinimumWidth(460)
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(24, 22, 24, 22)
+        dialog.setWindowTitle('设置 · 视界盾')
+        dialog.setMinimumWidth(480)
+        if self.state in ('starting', 'running'):
+            from overlay_window import exclude_capture
+            exclude_capture(dialog)
+        outer = QVBoxLayout(dialog)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        contents = QWidget()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(contents)
+        outer.addWidget(scroll, 1)
+        layout = QVBoxLayout(contents)
+        layout.setContentsMargins(24, 22, 24, 0)
         layout.setSpacing(14)
         heading = QLabel('防护效果')
         heading.setObjectName('section')
@@ -446,7 +492,7 @@ class Shell(QWidget):
         layout.addWidget(caption)
         effects = {}
         for index, (key, title, description) in enumerate((
-                ('shield_enabled', '遮蔽范围模糊化', '风险出现时按应用策略保护，可运行中修改。'),
+                ('shield_enabled', '风险时遮蔽保护范围', '仅在检测到风险时使用主界面选定的模糊或深色效果。'),
                 ('sound_enabled', '音效提示', '检测到陌生人或旁人时播放系统提示音。'),
                 ('popup_enabled', '弹窗提示', '检测到陌生人或旁人时显示隐私提醒。'))):
             row = QHBoxLayout()
@@ -472,19 +518,50 @@ class Shell(QWidget):
             layout.addLayout(row)
             if index < 2:
                 layout.addWidget(separator())
-        note = QLabel('三个防护效果保存后立即生效，也可在主界面直接选择。\n关闭遮蔽后仍检测风险，但屏幕内容保持可见。')
+        note = QLabel('效果保存后立即生效；模糊强度可在主界面拖动调整。\n关闭遮蔽后仍检测风险并提示，屏幕内容保持可见。')
         note.setObjectName('caption')
         note.setWordWrap(True)
         layout.addWidget(note)
-        scope_chat = QPushButton('框选并追踪应用区域…')
-        scope_window = QPushButton('指定应用整窗保护…')
-        reset_scope = QPushButton('清除应用校准')
-        scope_chat.clicked.connect(lambda: (dialog.reject(), self.calibrate_scope(False)))
-        scope_window.clicked.connect(lambda: (dialog.reject(), self.calibrate_scope(True)))
-        reset_scope.clicked.connect(lambda: self.save_profiles({}))
+        layout.addWidget(separator())
+        scope_heading = QLabel('选择保护范围')
+        scope_heading.setObjectName('section')
+        layout.addWidget(scope_heading)
+        scope_note = QLabel('先暂停防护并打开目标应用，再选择下面一种方式。\n设置范围后仅保护所选部分，其他区域保持清晰。\n选择或清除范围会先保存本页选项，并立即应用。')
+        scope_note.setObjectName('caption')
+        scope_note.setWordWrap(True)
+        layout.addWidget(scope_note)
+        scope_chat = QPushButton('局部保护：拖动框选区域…')
+        scope_window = QPushButton('整窗保护：点击目标窗口…')
+        reset_scope = QPushButton('清除所选范围，恢复自动保护')
+        def choose_scope(whole):
+            save_form()
+            dialog.reject()
+            self.calibrate_scope(whole)
+        def clear_scope():
+            save_form()
+            self.save_profiles({})
+            self.detail.setText('已清除所选范围；下次启用将恢复自动应用与内容保护。')
+        scope_chat.clicked.connect(lambda: choose_scope(False))
+        scope_window.clicked.connect(lambda: choose_scope(True))
+        reset_scope.clicked.connect(clear_scope)
         layout.addWidget(scope_chat)
+        local_note = QLabel('框选对话区、输入框或其他局部；拖动窗口时跟随。\n定位丢失时暂停该选区遮蔽，并提示重新框选。\n纯视觉选区在软件重启后需重新框选。')
+        local_note.setObjectName('caption')
+        local_note.setWordWrap(True)
+        layout.addWidget(local_note)
         layout.addWidget(scope_window)
+        whole_note = QLabel('点击一个应用窗口，保护该窗口的全部可见内容。\n跟随窗口拖动与缩放，其他窗口保持清晰。')
+        whole_note.setObjectName('caption')
+        whole_note.setWordWrap(True)
+        layout.addWidget(whole_note)
+        replace_note = QLabel('同一应用仅保存一个范围（局部或整窗）。再次选择会替换先前范围。')
+        replace_note.setObjectName('caption')
+        replace_note.setWordWrap(True)
+        layout.addWidget(replace_note)
         layout.addWidget(reset_scope)
+        for button in (scope_chat, scope_window, reset_scope):
+            button.setEnabled(self.state == 'paused' and not self.preview)
+            button.setToolTip('请先暂停防护再配置范围' if self.state != 'paused' else '')
         layout.addWidget(separator())
         startup_heading = QLabel('启动偏好')
         startup_heading.setObjectName('section')
@@ -517,11 +594,14 @@ class Shell(QWidget):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         footer = QHBoxLayout()
+        footer.setContentsMargins(24, 12, 24, 22)
         footer.addWidget(enroll)
         footer.addStretch()
         footer.addWidget(buttons)
-        layout.addLayout(footer)
-        if dialog.exec() == QDialog.Accepted:
+        outer.addLayout(footer)
+        available_height = self.screen().availableGeometry().height()
+        dialog.resize(500, min(850, max(360, available_height-72)))
+        def save_form():
             for key, checkbox in effects.items():
                 self.effect_checks[key].setChecked(checkbox.isChecked())
                 self.change_effect(key, checkbox.isChecked())
@@ -531,6 +611,8 @@ class Shell(QWidget):
             self.settings.setValue('auto_enable', auto.isChecked())
             self.settings.setValue('start_hidden', hidden.isChecked())
             self.settings.sync()
+        if dialog.exec() == QDialog.Accepted:
+            save_form()
         dialog.deleteLater()
 
     def save_profiles(self, profiles):
@@ -539,16 +621,18 @@ class Shell(QWidget):
         self.session_profiles=profiles
         self.settings.setValue('app_profiles', json.dumps(stored_profiles(profiles), ensure_ascii=True))
         self.settings.sync()
+        self.refresh_scope_summary()
         self.backend.app_profiles = profiles
         if hasattr(self.backend, 'send_preferences'):
             self.backend.send_preferences()
 
     def calibrate_scope(self, whole=False):
         if self.preview or self.state != 'paused':
-            self.detail.setText('请先暂停防护，再打开目标应用并校准区域。')
+            self.detail.setText('请先暂停防护，再打开目标应用并选择保护范围。')
             return
         from scope_picker import ScopePicker
         self.hide()
+        picker = None
         try:
             picker = ScopePicker(whole)
             if picker.exec() == QDialog.Accepted and picker.result_profile:
@@ -566,11 +650,13 @@ class Shell(QWidget):
                     profile=result['profile']
                 profiles[key] = profile
                 self.save_profiles(profiles)
-                self.detail.setText('区域已绑定应用控件/视觉特征；拖动时跟随，失配时临时扩大保护。')
-            picker.deleteLater()
+                self.detail.setText('已选择整窗保护，仅保护刚才点击的窗口。' if whole else
+                                    '已选择局部保护，仅保护框选区域；定位丢失时暂停该选区遮蔽，请重新框选。')
         except Exception:
             self.detail.setText('区域校准失败，请重新选择；当前保护策略继续保留。')
         finally:
+            if picker is not None:
+                picker.deleteLater()
             self.show_panel()
 
     def register_owner(self):
@@ -586,6 +672,8 @@ class Shell(QWidget):
     def quit_app(self):
         if self.quitting:
             return
+        if self.effect_update_timer.isActive():
+            self.apply_effect_text()
         self.quitting = True
         self.set_state('stopping', '正在释放防护资源。')
         self.backend.stop()

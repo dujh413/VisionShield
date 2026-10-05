@@ -1,7 +1,8 @@
 """Bounded, in-memory mask rendering. This module does not import Qt or models.
 
 The caller owns the current immutable capture. Workers receive only owned mask
-crops; completed crops are usable only after exact source/geometry validation.
+crops. Opaque blurred pixels may bridge the next capture for at most 250ms,
+only while the complete mask geometry and effect remain identical.
 """
 from dataclasses import dataclass
 import math
@@ -162,6 +163,7 @@ class BlurRequest:
     geometry: tuple
     crops: tuple  # (physical xywh, owned BGR source) pairs
     radius: int | None = None
+    created_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +178,7 @@ class BlurResult:
     device: str = ''
     gpu_ms: float = 0.0
     fallback: str | None = None
+    created_at: float | None = None
 
 
 class BlurWorker:
@@ -291,12 +294,13 @@ class BlurWorker:
                     (time.perf_counter()-start)*1000, radius=request.radius,
                     backend=next(iter(backends)) if len(backends) == 1 else 'mixed',
                     device='; '.join(sorted(devices)), gpu_ms=gpu_ms,
-                    fallback='; '.join(sorted(fallbacks)) or None)
+                    fallback='; '.join(sorted(fallbacks)) or None,
+                    created_at=request.created_at)
             except Exception as error:
                 # Never retain traceback/image data or put content into messages.
                 result = BlurResult(request.sequence, request.geometry, (),
                                     (time.perf_counter()-start)*1000, type(error).__name__,
-                                    request.radius)
+                                    request.radius, created_at=request.created_at)
             with self._condition:
                 if result is not None and not self._stopped and generation == self._generation:
                     self._completed = result
@@ -313,6 +317,7 @@ class BlurWorker:
 
 class BlurCache:
     """Qt-thread coordinator; returns validated RGB regions and dark fallbacks."""
+    MAX_BRIDGE_SECONDS = .250
     def __init__(self, worker=None, clock=time.monotonic, radius=None):
         if radius is not None and (type(radius) is not int or radius < 0):
             raise ValueError('invalid box radius')
@@ -322,6 +327,7 @@ class BlurCache:
         self._ready = {}
         self._submitted = None
         self._sequence = 0
+        self._minimum_sequence = 1
         self._closed = False
         self._retry_at = 0.0
         self.last_error = None
@@ -329,6 +335,7 @@ class BlurCache:
         self.backend, self.device = 'none', ''
         self.gpu_ms, self.fallback = 0.0, None
         self._image_shape = None
+        self._geometry = None
 
     @staticmethod
     def _matches(image, box, source):
@@ -346,6 +353,17 @@ class BlurCache:
         self.backend, self.device = 'none', ''
         self.gpu_ms, self.fallback = 0.0, None
         self._image_shape = None
+        self._geometry = None
+        self._minimum_sequence = self._sequence+1
+
+    def set_radius(self, radius):
+        if radius is not None and (type(radius) is not int or radius < 0):
+            raise ValueError('invalid box radius')
+        if radius != self.radius:
+            # Keep the worker's GPU session, but never reuse weaker/older pixels
+            # after changing the requested strength.
+            self.clear()
+            self.radius = radius
 
     def close(self):
         self._closed = True
@@ -370,12 +388,17 @@ class BlurCache:
             raise ValueError('invalid mask crop')
         if self._image_shape is not None and self._image_shape != image.shape:
             self.clear()
+        if self._geometry is not None and self._geometry != boxes:
+            self.clear()
         self._image_shape = image.shape
+        self._geometry = boxes
+        now = self._clock()
         result = self.worker.poll()
         if result is not None:
             if self._submitted is not None and result.sequence == self._submitted.sequence:
                 self._submitted = None
-            if result.geometry == boxes and result.radius == self.radius:
+            if (self._minimum_sequence <= result.sequence <= self._sequence
+                    and result.geometry == boxes and result.radius == self.radius):
                 self.last_elapsed_ms = result.elapsed_ms
                 self.last_error = result.error
                 self.backend, self.device = result.backend, result.device
@@ -385,37 +408,51 @@ class BlurCache:
                 else:
                     self._retry_at = 0.0
                     for box, source, rendered in result.crops:
-                        if box in boxes and self._matches(image, box, source):
+                        fresh = (result.created_at is not None
+                                 and 0 <= now-result.created_at <= self.MAX_BRIDGE_SECONDS)
+                        matches = box in boxes and self._matches(image, box, source)
+                        if box in boxes and (matches or fresh):
                             if rendered.shape != source.shape or rendered.dtype != np.uint8:
                                 self.last_error = 'InvalidRender'
                                 self._retry_at = self._clock()+1.0
                                 continue
-                            self._ready[box] = (source, rendered)
-        # Image-object equality is deliberately insufficient: even one changed
-        # pixel invalidates that region, and unrelated changes keep it reusable.
-        self._ready = {box: cached for box, cached in self._ready.items()
-                       if box in boxes and self._matches(image, box, cached[0])}
+                            self._ready[box] = (source, rendered, now if matches else result.created_at)
+        # A completed RGB patch is completely opaque: while its next frame is
+        # rendered it covers, rather than reveals, the changed underlying text.
+        # Never bridge different geometry, strength, or older captured content.
+        validated = {}
+        for box, cached in self._ready.items():
+            if box not in boxes:
+                continue
+            if self._matches(image, box, cached[0]):
+                validated[box] = (cached[0], cached[1], now)
+            elif (cached[2] is not None
+                  and 0 <= now-cached[2] <= self.MAX_BRIDGE_SECONDS):
+                validated[box] = cached
+        self._ready = validated
         ready = [(box, self._ready[box][1]) for box in boxes if box in self._ready]
         pending = [box for box in boxes if box not in self._ready]
-        if not pending:
+        dirty = [box for box in boxes if box not in self._ready
+                 or not self._matches(image, box, self._ready[box][0])]
+        if not dirty:
             if self._submitted is not None:
                 self.worker.cancel()
                 self._submitted = None
             return ready, []
         same_pending = (self._submitted is not None and self._submitted.geometry == boxes
-                        and tuple(box for box, _ in self._submitted.crops) == tuple(pending)
+                        and tuple(box for box, _ in self._submitted.crops) == tuple(dirty)
                         and all(self._matches(image, box, source)
                                 for box, source in self._submitted.crops))
         if not same_pending and self._clock() >= self._retry_at:
             # Copy only protected crops, never the full capture for a small mask.
             crops = []
-            for box in pending:
+            for box in dirty:
                 source = np.array(image[box[1]:box[1]+box[3], box[0]:box[0]+box[2]],
                                   copy=True, order='C')
                 source.flags.writeable = False
                 crops.append((box, source))
             self._sequence += 1
-            request = BlurRequest(self._sequence, boxes, tuple(crops), self.radius)
+            request = BlurRequest(self._sequence, boxes, tuple(crops), self.radius, now)
             if self.worker.submit(request):
                 self._submitted = request
         return ready, pending

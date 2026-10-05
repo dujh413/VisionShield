@@ -79,7 +79,7 @@ class ExperienceRegressions(unittest.TestCase):
         moved=self.window(rect=(200,200,600,500),client=(200,200,600,500))
         self.assertEqual(application_masks([moved],[],False,profile)[0],[(440,250,360,400)])
         resized=self.window(rect=(100,100,700,500),client=(100,100,700,500))
-        self.assertEqual(application_masks([resized],[],False,profile)[0],[resized['rect']])
+        self.assertEqual(application_masks([resized],[],False,profile)[0],[])
 
     def test_image_masks_entire_application_without_ocr_hits(self):
         window=self.window(mode='window')
@@ -98,7 +98,7 @@ class ExperienceRegressions(unittest.TestCase):
     def test_corrupt_calibration_and_inventory_failure_are_conservative(self):
         bad={'chat':{'mode':'chat','region':[0,0,float('nan'),1],'size':[600,500]}}
         self.assertEqual(valid_profiles(bad),{})
-        self.assertTrue(application_masks([],[],True)[1])
+        self.assertEqual(application_masks([],[],True),([],False))
 
 
 if __name__=='__main__':unittest.main()

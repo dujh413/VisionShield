@@ -4,6 +4,53 @@ import queue
 import time
 
 
+def locate_regions(request):
+    """Bind COM bounds to stable captured pixels, never to request age alone."""
+    from app_scope import window_inventory
+    from screen_capture import ScreenCapture
+    from region_anchor import locate_anchor
+    from region_tracker import client_signature
+    capture=ScreenCapture()
+    try:
+        before_windows=window_inventory(capture.monitor)
+        before=capture.grab().image
+        regions={};clients={};signatures={}
+        for key,task in request['tasks'].items():
+            signature=request.get('signatures',{}).get(key)
+            window=next((w for w in before_windows if signature and
+                         w['handle']==signature['handle'] and w['pid']==signature['pid']),None)
+            if window is None:
+                regions[key]=None;clients[key]=request['clients'][key]
+                if signature:signatures[key]=signature
+                continue
+            clients[key]=window['client'];signatures[key]=signature
+            if (tuple(window['client'][2:])!=signature['size']
+                    or client_signature(before,window['client'])!=signature['layout']):
+                regions[key]=None
+                continue
+            try:regions[key]=locate_anchor(task['handle'],task['anchor'],request['origin'])
+            except Exception:regions[key]=None
+        after_windows=window_inventory(capture.monitor)
+        after=capture.grab().image
+        for key,rect in list(regions.items()):
+            if rect is None:continue
+            signature=signatures[key]
+            window=next((w for w in after_windows if w['handle']==signature['handle']
+                         and w['pid']==signature['pid']),None)
+            if (window is None or window['client']!=clients[key]
+                    or client_signature(after,window['client'])!=signature['layout']):
+                regions[key]=None
+                continue
+            # A second structural read also rejects movement/replacement during
+            # the asynchronous call even if the surrounding pixels look alike.
+            try:confirmed=locate_anchor(request['tasks'][key]['handle'],request['tasks'][key]['anchor'],request['origin'])
+            except Exception:confirmed=None
+            if confirmed!=rect:regions[key]=None
+        return {'regions':regions,'sequence':request['sequence'],'requested_at':request['requested_at'],
+                'clients':clients,'signatures':signatures,'finished_at':time.monotonic()}
+    finally:capture.close()
+
+
 def worker_main(inputs,outputs,stop):
     from ocr_worker import put_latest
     try:
@@ -48,12 +95,7 @@ def worker_main(inputs,outputs,stop):
                         put_latest(outputs,{'profile':clean[window['key']]})
                     finally:capture.close()
                 else:
-                    regions={}
-                    for key,task in request['tasks'].items():
-                        try:regions[key]=locate_anchor(task['handle'],task['anchor'],request['origin'])
-                        except Exception:regions[key]=None
-                    put_latest(outputs,{'regions':regions,'sequence':request['sequence'],'requested_at':request['requested_at'],
-                                        'clients':request['clients'],'finished_at':time.monotonic()})
+                    put_latest(outputs,locate_regions(request))
             except Exception as error:
                 put_latest(outputs,{'error':str(error)[:160] if isinstance(error,ValueError) else type(error).__name__})
     except Exception as error:

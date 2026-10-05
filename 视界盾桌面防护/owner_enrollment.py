@@ -17,12 +17,15 @@ def enroll_main(root, stop, enroll, output):
         import numpy as np
         from camera_test import open_camera
         from identity_test import load_models,extract
+        from face_detection import FaceScanner
         from owner_tracking import ShortTracker
         from ocr_worker import put_latest
         cv2.setNumThreads(1)
         detector,recognizer = load_models(root)
+        # 登记阶段每帧扫描分区，旁人出现时立即取消采样，不借用限频间隙。
+        scanner = FaceScanner(detector,detail_interval=0)
         tracker = ShortTracker()
-        camera = open_camera(0,'auto')
+        camera = open_camera(0,'auto',resolution=(1280,720))
         samples,track_id,last_sample = [],None,0
         begun = time.monotonic()
         while not stop.is_set():
@@ -30,9 +33,7 @@ def enroll_main(root, stop, enroll, output):
             ok,image=camera.read()
             if not ok:raise RuntimeError('Camera read failed')
             h,w=image.shape[:2]
-            detector.setInputSize((w,h))
-            _,faces=detector.detect(image)
-            faces=[] if faces is None else list(faces)
+            faces=scanner.detect(image,before)
             tracks=tracker.update([(float(f[0])/w,float(f[1])/h,float(f[0]+f[2])/w,float(f[1]+f[3])/h) for f in faces],int((before-begun)*1000))
             message='仅本人入镜，然后点击“开始登记”'
             restart_required=False
