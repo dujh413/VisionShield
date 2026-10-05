@@ -85,6 +85,40 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(self.backend.starts, 0)
         self.assertEqual(self.panel.state, 'paused')
 
+    def test_effect_text_is_committed_only_when_enabling_and_saved_for_restart(self):
+        self.panel.effect_input.setText('８')
+        self.assertFalse(hasattr(self.backend, 'effect_text'))
+        with patch('overlay_window.exclude_capture'):
+            self.panel.toggle_guard()
+        self.assertEqual(self.backend.effect_text, '８')
+        self.panel.effect_input.setText('遮挡')
+        self.panel.effect_checks['shield_enabled'].setChecked(False)
+        self.assertEqual(self.backend.effect_text, '８')
+        self.backend.changed.emit('running', '虚构状态')
+        self.panel.toggle_guard()
+        with patch('overlay_window.exclude_capture'):
+            self.panel.toggle_guard()
+        self.assertEqual(self.backend.effect_text, '遮挡')
+        reopened=QSettings(self.path,QSettings.IniFormat)
+        self.assertEqual(reopened.value('effect_text'), '遮挡')
+
+    def test_empty_committed_mode_reports_detection_only(self):
+        self.panel.effect_input.setText('  ')
+        with patch('overlay_window.exclude_capture'):
+            self.panel.toggle_guard()
+        self.backend.changed.emit('running', '虚构状态')
+        self.assertIn('不遮蔽', self.panel.status.text())
+        self.assertEqual(self.backend.effect_text, '  ')
+
+    def test_live_preferences_do_not_send_uncommitted_edits(self):
+        backend=Backend()
+        backend.peer=Mock()
+        backend.effect_text='12'
+        backend.send_preferences()
+        packet=json.loads(backend.peer.write.call_args.args[0])
+        self.assertEqual(packet['effect_text'],'12')
+        self.assertIn('app_profiles',packet)
+
     def test_service_status_delivers_reminder_and_stopping_ignores_it(self):
         backend=Backend()
         alerts=[];updates=[]
@@ -148,9 +182,11 @@ class ShellTests(unittest.TestCase):
     def test_backend_launch_transmits_shield_choice(self):
         backend = Backend()
         backend.shield_enabled = False
+        backend.effect_text = '８'
         with patch('process_lifetime.ProcessJob'), patch.object(backend.server, 'listen', return_value=True), patch.object(backend.process, 'start'):
             backend.start()
         self.assertEqual(backend.process.processEnvironment().value('VISION_SHIELD_SHIELD_ENABLED'), '0')
+        self.assertEqual(backend.process.processEnvironment().value('VISION_SHIELD_EFFECT_TEXT'), '８')
         backend.watchdog.stop()
         backend.finished(0, QProcess.NormalExit)
 

@@ -7,6 +7,7 @@ import numpy as np
 import queue
 import shutil
 import time
+from dataclasses import replace
 from incremental_ocr import IncrementalOCR
 
 
@@ -85,6 +86,7 @@ def recognize(ocr, image, preserve_scale=False):
 def put_latest(channel, item):
     try:
         channel.put_nowait(item)
+        return True
     except queue.Full:
         try:
             channel.get_nowait()
@@ -92,8 +94,9 @@ def put_latest(channel, item):
             pass
         try:
             channel.put_nowait(item)
+            return True
         except queue.Full:
-            pass
+            return False
 
 
 def process_main(root, inputs, outputs, backend='fast'):
@@ -101,12 +104,17 @@ def process_main(root, inputs, outputs, backend='fast'):
         if backend=='fast':
             from fast_ocr import FastOCR
             ocr=FastOCR()
-            infer=ocr.recognize
+            stage_timings = []
+            def infer(image, native):
+                lines = ocr.recognize(image, native)
+                stage_timings.append(dict(ocr.last_timing))
+                return lines
             providers=ocr.providers
         else:
             ocr = build_ocr(root)
             infer=lambda image,native:recognize(ocr,image,native)
             providers={'backend':'paddle_cpu'}
+            stage_timings = []
         outputs.put({'ready': True,'backend':backend,'providers':providers})
         incremental = IncrementalOCR()
         while True:
@@ -114,11 +122,19 @@ def process_main(root, inputs, outputs, backend='fast'):
             if frame is None:
                 return
             started = time.monotonic()
+            stage_timings.clear()
             lines, metrics = incremental.run(frame.image, infer)
             put_latest(outputs, {'frame_id': frame.frame_id, 'captured_at': frame.captured_at,
                                  'ocr_finished_at': time.monotonic(), 'image': frame.image,
                                  'lines': lines, 'cached': metrics['mode']=='cached',
                                  'mode': metrics['mode'], 'area_ratio': metrics['area_ratio'],
+                                 'unknown_regions': metrics['unknown_regions'],
+                                 'regions_count': metrics['regions_count'], 'diff_ms': metrics['diff_ms'],
+                                 'capture_ms': frame.capture_ms,
+                                 'queue_wait_ms': max(0, (started-frame.submitted_at)*1000) if frame.submitted_at else None,
+                                 'capture_to_infer_ms': (started-frame.captured_at)*1000,
+                                 'stage_ms': {key: sum(t[key] for t in stage_timings) for key in
+                                              ('preprocess_ms','detection_ms','crop_ms','recognition_ms')} if stage_timings else {},
                                  'elapsed_ms': (time.monotonic()-started)*1000})
     except Exception as error:
         # 不保存OCR结果或桌面原文，异常详情只出现在终端。
@@ -135,7 +151,7 @@ class OCRWorker:
         self.process.start()
 
     def submit(self, frame):
-        put_latest(self.inputs, frame)
+        return put_latest(self.inputs, replace(frame, submitted_at=time.monotonic()))
 
     def poll(self):
         items = []
@@ -148,6 +164,8 @@ class OCRWorker:
     def close(self):
         self.process.terminate()
         self.process.join(timeout=2)
+        if self.process.is_alive():
+            raise TimeoutError("OCR进程未停止")
         # 强制停止子进程时，不等待仍含屏幕图像的队列馈送线程。
         self.inputs.cancel_join_thread()
         self.outputs.cancel_join_thread()

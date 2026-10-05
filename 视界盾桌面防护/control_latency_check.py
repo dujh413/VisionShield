@@ -33,7 +33,8 @@ class Fixture(QWidget):
         self.sequence+=1
         self.sent=time.perf_counter()
         self.sender.sendto(json.dumps({'owner_verified':False,'protect_request':True,'faces_count':2,
-                                      'sequence':self.sequence,'session':'fictional-control-check'}).encode(),('127.0.0.1',self.port))
+                                      'sequence':self.sequence,'session':'fictional-control-check',
+                                      'updated_at':time.time()}).encode(),('127.0.0.1',self.port))
 
     def poll(self):
         self.bridge.poll()

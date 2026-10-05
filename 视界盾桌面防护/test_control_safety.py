@@ -18,7 +18,7 @@ class ControlSafetyTests(unittest.TestCase):
         cls.app=QApplication.instance() or QApplication([])
 
     def setUp(self):
-        self.panel=ControlPanel(integrated=True)
+        self.panel=ControlPanel(integrated=True, effect_text='遮挡')
         self.now=time.monotonic()
         p=self.panel
         p.started=self.now-40
@@ -32,8 +32,10 @@ class ControlSafetyTests(unittest.TestCase):
         p.worker.process.is_alive.return_value=True
         p.overlay=Mock()
         p.latest=Frame(1,self.now,{},np.zeros((64,64,3),dtype=np.uint8))
-        p.content.update(p.latest.image)
-        p.content.accept(p.latest.image,[])
+        p.content.observe(p.latest)
+        self.lines=[{'text':'ordinary','confidence':.99,'polygon':[[10,10],[50,10],[50,25],[10,25]]}]
+        p.content.accept({'frame_id':1,'captured_at':self.now,'image':p.latest.image,
+                          'lines':self.lines,'unknown_regions':[]},self.now)
         p.last_ocr_finished=self.now
         p.ready=True
         p.writer=Mock();p.log=Mock()
@@ -149,11 +151,30 @@ class ControlSafetyTests(unittest.TestCase):
         self.panel.last_ocr_finished=self.now-20
         self.tick()
         self.assertTrue(self.panel.protecting)
-        self.panel.worker.poll.return_value=[{'captured_at':self.now,'image':self.panel.latest.image,
-                                             'lines':[],'elapsed_ms':20}]
+        self.panel.latest.frame_id=2
+        self.panel.content.observe(self.panel.latest)
+        self.panel.worker.poll.return_value=[{'frame_id':2,'captured_at':self.now,'image':self.panel.latest.image,
+                                             'lines':self.lines,'unknown_regions':[],'elapsed_ms':20}]
         self.tick()
         self.assertFalse(self.panel.protecting)
         self.assertIsNone(self.panel.error)
+
+    def test_empty_result_keeps_unknown_protected(self):
+        self.panel.latest.frame_id=2
+        self.panel.content.observe(self.panel.latest)
+        self.panel.worker.poll.return_value=[{'frame_id':2,'captured_at':self.now,
+            'image':self.panel.latest.image,'lines':[],'elapsed_ms':20}]
+        self.tick()
+        self.assertTrue(self.panel.protecting)
+        self.assertTrue(self.panel.overlay.set_masks.call_args.kwargs['full'])
+
+    def test_empty_mode_suppresses_exception_masks_without_stopping_detection(self):
+        self.panel.apply_preferences({'effect_text':''})
+        self.panel.camera.poll.side_effect=RuntimeError('synthetic failure')
+        with patch('traceback.print_exc'):
+            self.tick()
+        self.assertFalse(self.panel.protecting)
+        self.assertFalse(self.panel.overlay.set_masks.call_args.kwargs['full'])
 
 
 if __name__=='__main__':unittest.main()

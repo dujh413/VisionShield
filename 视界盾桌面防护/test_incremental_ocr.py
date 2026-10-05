@@ -64,6 +64,47 @@ class IncrementalTests(unittest.TestCase):
         _,info=engine.run(second,lambda *_:[])
         self.assertEqual(info['mode'],'full')
 
+    def test_distant_changes_use_separate_small_crops(self):
+        engine=IncrementalOCR()
+        engine.run(self.image,lambda *_:[])
+        changed=self.image.copy()
+        changed[100,100]=1
+        changed[800,800]=1
+        calls=[]
+        def infer(crop,native):
+            calls.append(crop.shape)
+            return []
+        _,info=engine.run(changed,infer)
+        self.assertEqual(info['mode'],'partial')
+        self.assertEqual(len(calls),2)
+        self.assertLess(info['area_ratio'],.05)
+
+    def test_failed_second_crop_does_not_commit_cache(self):
+        engine=IncrementalOCR()
+        engine.run(self.image,lambda *_:[])
+        changed=self.image.copy()
+        changed[100,100]=1
+        changed[800,800]=1
+        calls=[]
+        def infer(*_):
+            calls.append(1)
+            if len(calls)==2:
+                raise RuntimeError('fake failure')
+            return []
+        with self.assertRaises(RuntimeError):
+            engine.run(changed,infer)
+        self.assertIs(engine.image,self.image)
+        self.assertEqual(engine.partial_updates,0)
+
+    def test_periodic_refresh_without_pixel_changes(self):
+        from unittest.mock import patch
+        engine=IncrementalOCR(full_refresh_s=1.)
+        with patch('incremental_ocr.time.monotonic',return_value=0.):
+            engine.run(self.image,lambda *_:[])
+        with patch('incremental_ocr.time.monotonic',return_value=2.):
+            _,info=engine.run(self.image.copy(),lambda *_:[])
+        self.assertEqual(info['mode'],'full')
+
 
 if __name__=='__main__':
     unittest.main()

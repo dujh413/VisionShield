@@ -1,8 +1,11 @@
 import ctypes
 from ctypes import wintypes
+import numpy as np
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QColor, QPainter, QImage
 from PySide6.QtWidgets import QWidget
+from mask_effect import MaskEffect
+from blur_worker import BlurWorker, crop_boxes
 
 
 def exclude_capture(widget):
@@ -28,57 +31,108 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setGeometry(screen.geometry())
         screen.geometryChanged.connect(self.screen_geometry_changed)
+        self.padding = 8
+        self.mask_image = None
         self.rectangles = []
         self.full = False
-        self.blurs = []
-        self.mask_image = None
-        self.padding = 8
+        self.effect = MaskEffect('block')
+        self.blur_worker = None
+        self.blur_packet = None
+        self.blur_images = []
+        self.last_blur_request = None
+        self.blur_validated_image = None
+        self.blur_ms = None
         self.show()
         exclude_capture(self)
 
-    def screen_geometry_changed(self,geometry):
-        self.setGeometry(geometry)
-        self.set_masks([],full=True)
+    @property
+    def blurs(self):
+        return [((a,b,c-a,d-b),image) for (a,b,c,d),image in self.blur_images]
 
-    def set_masks(self, rectangles, full=False, image=None, padding=8):
-        if self.mask_image is image and self.rectangles == rectangles and self.full == full and self.padding == padding:
-            return
+    def screen_geometry_changed(self, geometry):
+        self.setGeometry(geometry)
+        self.blur_packet, self.blur_images = None, []
+        self.set_masks([], full=True)
+
+    def set_effect(self, effect):
+        self.effect = effect
+        self.blur_packet, self.blur_images = None, []
+        self.last_blur_request = self.blur_validated_image = None
+        if self.blur_worker:
+            self.blur_worker.close()
+            self.blur_worker = None
+        if effect.mode == 'blur':
+            self.blur_worker = BlurWorker()
+        self.set_masks([], full=False)
+
+    def set_masks(self, rectangles, full=False, image=None, padding=8, frame_image=None):
+        if frame_image is None:
+            frame_image = image
+        self.mask_image = frame_image
+        padding_changed = self.padding != padding
         self.padding = padding
-        self.mask_image = image
-        self.rectangles, self.full = rectangles, full
-        self.blurs = []
-        if image is not None and not full:
-            import cv2
-            height,width = image.shape[:2]
-            for x,y,w,h in rectangles:
-                x1,y1 = max(0,int(x)-padding),max(0,int(y)-padding)
-                x2,y2 = min(width,int(x+w)+padding),min(height,int(y+h)+padding)
-                if x2<=x1 or y2<=y1:
-                    continue
-                roi = image[y1:y2,x1:x2]
-                # 强像素化后模糊，再压暗；绘制不透明图像，避免透出原字形。
-                small = cv2.resize(roi,(max(1,(x2-x1)//32),max(1,(y2-y1)//32)),interpolation=cv2.INTER_AREA)
-                small = cv2.GaussianBlur(small,(3,3),0)
-                obscured = cv2.resize(small,(x2-x1,y2-y1),interpolation=cv2.INTER_LINEAR)
-                obscured = (obscured*.45).astype('uint8')
-                rgb = cv2.cvtColor(obscured,cv2.COLOR_BGR2RGB)
-                qimage = QImage(rgb.data,rgb.shape[1],rgb.shape[0],rgb.strides[0],QImage.Format_RGB888).copy()
-                self.blurs.append(((x1,y1,x2-x1,y2-y1),qimage))
-        self.update()
+        if self.effect.mode == 'off':
+            rectangles, full = [], False
+        changed = self.rectangles != rectangles or self.full != full or padding_changed
+        self.rectangles, self.full = list(rectangles), bool(full)
+        if self.effect.mode == 'blur':
+            boxes = ([(0, 0, frame_image.shape[1], frame_image.shape[0])] if full and frame_image is not None
+                     else crop_boxes(frame_image, rectangles, margin=padding) if frame_image is not None else [])
+            packet = self.blur_worker.poll()
+            if packet is not None:
+                self.blur_packet = packet if 'error' not in packet else None
+                self.blur_validated_image = None
+            if (self.blur_packet is not None and frame_image is not None
+                    and self.blur_packet['boxes'] == boxes and self.blur_packet['radius'] == self.effect.radius):
+                if self.blur_validated_image is not frame_image:
+                    source = self.blur_packet['image']
+                    valid = source.shape == frame_image.shape and all(
+                        np.array_equal(source[y1:y2, x1:x2], frame_image[y1:y2, x1:x2])
+                        for x1, y1, x2, y2 in boxes)
+                    self.blur_validated_image = frame_image
+                    self.blur_images = []
+                    if valid:
+                        for box, bgr in self.blur_packet['patches']:
+                            rgb = np.ascontiguousarray(bgr[:, :, ::-1])
+                            height, width = rgb.shape[:2]
+                            qimage = QImage(rgb.data, width, height, rgb.strides[0], QImage.Format_RGB888).copy()
+                            self.blur_images.append((box, qimage))
+                        self.blur_ms = self.blur_packet['blur_ms']
+                    changed = True
+            else:
+                if self.blur_images:
+                    changed = True
+                self.blur_images = []
+                self.blur_validated_image = None
+            key = (id(frame_image), tuple(boxes), self.effect.radius)
+            if frame_image is not None and boxes and key != self.last_blur_request:
+                self.blur_worker.submit(frame_image, boxes, self.effect.radius)
+                self.last_blur_request = key
+        if changed:
+            self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(20, 24, 32, 255))
-        if self.full:
+        if self.effect.mode == 'off':
+            return
+        if self.effect.mode == 'blur' and self.blur_images:
+            ratio = self.devicePixelRatioF()
+            for (x1, y1, x2, y2), image in self.blur_images:
+                painter.drawImage(QRectF(x1/ratio, y1/ratio, (x2-x1)/ratio, (y2-y1)/ratio), image)
+        elif self.full:
             painter.drawRect(self.rect())
         else:
             # mss为物理像素；Qt窗口内坐标为逻辑像素。
             ratio = self.devicePixelRatioF()
-            if self.blurs:
-                for (x,y,width,height),image in self.blurs:
-                    painter.drawImage(QRectF(x/ratio,y/ratio,width/ratio,height/ratio),image)
-                return
             for x, y, width, height in self.rectangles:
                 painter.drawRect(QRectF((x-self.padding)/ratio, (y-self.padding)/ratio,
-                                       (width+self.padding*2)/ratio, (height+self.padding*2)/ratio))
+                                       (width+2*self.padding)/ratio, (height+2*self.padding)/ratio))
+
+    def closeEvent(self, event):
+        if self.blur_worker:
+            self.blur_worker.close()
+            self.blur_worker = None
+        self.blur_packet, self.blur_images = None, []
+        event.accept()
