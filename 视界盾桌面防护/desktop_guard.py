@@ -15,8 +15,9 @@ from ocr_worker import OCRWorker
 from overlay_window import OverlayWindow, exclude_capture
 from protection_state import ProtectionState
 from content_state import ContentState
+from frame_scheduler import FrameScheduler
 from mask_effect import parse_effect
-from diagnostics import Diagnostics
+from performance_log import PerformanceLog
 from runtime_paths import desktop_root, records_directory
 
 
@@ -54,6 +55,7 @@ class ControlPanel(QWidget):
         self.camera = None
         self.integrated = integrated
         self.content = ContentState(capture_timeout=1.5)
+        self.scheduler = FrameScheduler()
         self.alert_message = None
         self.last_risk = False
         self.last_alert_at = -100
@@ -117,6 +119,7 @@ class ControlPanel(QWidget):
             self.hits, self.last_capture = [], 0
             self.error, self.ready = None, False
             self.content = ContentState(capture_timeout=1.5)
+            self.scheduler = FrameScheduler()
             self.last_risk, self.alert_message, self.last_ocr_finished = False, None, None
             records = records_directory()
             records.mkdir(parents=True, exist_ok=True)
@@ -124,7 +127,7 @@ class ControlPanel(QWidget):
             self.writer = csv.writer(self.log)
             self.writer.writerow(['elapsed_s','state','frame_id','sensitive_lines','categories','ocr_ms'])
             self.started = time.monotonic()
-            self.diagnostics = Diagnostics(records/f'diagnostic_{datetime.now():%Y%m%d_%H%M%S_%f}') if self.diagnostics_enabled else None
+            self.diagnostics = PerformanceLog(records/'performance'/f'{datetime.now():%Y%m%d_%H%M%S_%f}') if self.diagnostics_enabled else None
             self.last_log_state = None
             self.timer.start()
             self.status.setText('启动中：初始化本地OCR；'+('未确认安全前临时全屏保护。' if self.drawing_enabled() else '仅检测与提示，不遮蔽屏幕。'))
@@ -194,11 +197,15 @@ class ControlPanel(QWidget):
             except Exception as error:
                 failures.append('log:'+type(error).__name__)
         if self.diagnostics:
-            self.diagnostics.close()
-            self.diagnostics = None
+            try:
+                self.diagnostics.close()
+                self.diagnostics = None
+            except Exception as error:
+                failures.append('diagnostics:'+type(error).__name__)
         self.latest = self.valid_image = None
         self.hits = []
         self.content = ContentState(capture_timeout=1.5)
+        self.scheduler = FrameScheduler()
         self.ready = False
         self.last_ocr_finished = None
         self.protecting = self.overlay is not None
@@ -208,6 +215,7 @@ class ControlPanel(QWidget):
 
     def tick(self):
         try:
+            callback_started = time.monotonic()
             now = time.monotonic()
             sensor = self.camera if self.integrated else self.bridge
             sensor.poll()
@@ -215,7 +223,7 @@ class ControlPanel(QWidget):
             confirmed_risk = (bool(sensor.last and sensor.last.get('stranger_detected', False))
                               if self.integrated else risk)
             if risk and confirmed_risk and not self.last_risk and now-self.last_alert_at>=10:
-                self.alert_message = reason+('，已启用隐私遮蔽。' if self.shield_enabled else '，遮蔽已关闭，请注意屏幕内容。')
+                self.alert_message = reason+('，已启用隐私遮蔽。' if self.drawing_enabled() else '，遮蔽已关闭，请注意屏幕内容。')
                 self.last_alert_at = now
             self.last_risk = confirmed_risk
             ocr_ms = None
@@ -233,25 +241,33 @@ class ControlPanel(QWidget):
                         raise RuntimeError(self.error)
                     self.latest = frame
                     self.content.observe(frame)
+            # 必须在poll分发待处理请求之前替换为当前帧，避免再序列化旧帧。
+            if self.ready and not self.error and self.scheduler.due(self.latest, now):
+                if self.worker.submit(self.latest):
+                    self.scheduler.submitted(self.latest, now)
+                    self.content.mark_submitted(now)
             for item in self.worker.poll():
                 if item.get('ready'):
                     self.ready = True
+                    if self.diagnostics:
+                        self.diagnostics.event(now,self.started,{**item,'event':'ocr_ready'})
                 elif 'error' in item:
                     self.error = 'OCR异常：'+item['error']
                 elif 'lines' in item:
                     received = time.monotonic()
+                    index_started = time.monotonic()
                     accepted = self.content.accept(item, received, self.semantic)
+                    index_ms = (time.monotonic()-index_started)*1000
                     ocr_ms = item['elapsed_ms']
                     if accepted:
                         self.last_ocr_finished = received
                     if self.diagnostics:
                         self.diagnostics.event(received,self.started,{**item,'event':'ocr_result',
                             'accepted':accepted,'lines_count':len(item['lines']),
-                            'result_age_ms':(received-item['captured_at'])*1000})
+                            'result_age_ms':(received-item['captured_at'])*1000,
+                            'receive_delay_ms':(received-item.get('ocr_finished_at',received))*1000,
+                            'index_ms':index_ms})
             now = time.monotonic()
-            if self.ready and not self.error and self.content.should_submit(now):
-                if self.worker.submit(self.content.latest):
-                    self.content.mark_submitted(now)
             view = self.content.view(now)
             self.hits = view['hits']
             self.valid_image = self.content.result['image'] if view['coordinates_valid'] else None
@@ -301,9 +317,15 @@ class ControlPanel(QWidget):
                 self.last_log_state = summary
             if self.diagnostics:
                 self.diagnostics.heartbeat(now,self.started,{**view,'frame_id':self.latest.frame_id if self.latest else None,
+                    'frame_age_ms':(now-self.latest.captured_at)*1000 if self.latest else None,
                     'ocr_ready':self.ready,'ocr_alive':self.worker.process.is_alive(),
+                    'capture_alive':self.capture.thread.is_alive(),
+                    'sent_frames':self.worker.sent_frames,
+                    'unknown_regions':view.get('unknown_regions',0),
                     'sensitive_lines':len(self.hits),'effect':self.effect.mode,'radius':self.effect.radius,
-                    'blur_ms':self.overlay.blur_ms,'error':self.error})
+                    'control_ms':(time.monotonic()-callback_started)*1000,
+                    'blur_ms':self.overlay.blur_ms,'paint_ms':getattr(self.overlay,'last_paint_ms',0),
+                    'error':self.error})
         except Exception as error:
             # 保留可点击的控制面板；异常时不静默恢复内容。
             self.error = self.error or '控制流程异常：'+type(error).__name__

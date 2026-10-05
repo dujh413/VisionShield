@@ -1,11 +1,11 @@
 import ctypes
+import time
 from ctypes import wintypes
-import numpy as np
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QColor, QPainter, QImage
 from PySide6.QtWidgets import QWidget
 from mask_effect import MaskEffect
-from blur_worker import BlurWorker, crop_boxes
+from blur_renderer import BlurCache, mask_crops, physical_to_logical
 
 
 def exclude_capture(widget):
@@ -31,108 +31,166 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setGeometry(screen.geometry())
         screen.geometryChanged.connect(self.screen_geometry_changed)
-        self.padding = 8
-        self.mask_image = None
         self.rectangles = []
         self.full = False
+        self.padding = 8
         self.effect = MaskEffect('block')
-        self.blur_worker = None
-        self.blur_packet = None
-        self.blur_images = []
-        self.last_blur_request = None
-        self.blur_validated_image = None
-        self.blur_ms = None
+        self.blurs = []
+        self.mask_image = None
+        self._renderer = None
+        self._fallback_boxes = []
+        self._qimages = {}
+        self._closed = False
+        self._last_paint_ms = None
+        self._last_painted_at = None
         self.show()
         exclude_capture(self)
 
     @property
-    def blurs(self):
-        return [((a,b,c-a,d-b),image) for (a,b,c,d),image in self.blur_images]
+    def blur_worker(self):
+        return self._renderer.worker if self._renderer is not None else None
+
+    @property
+    def blur_images(self):
+        """Legacy xyxy view used by native mode/status integration."""
+        return [((x, y, x+w, y+h), image) for (x, y, w, h), image in self.blurs]
+
+    @property
+    def blur_ms(self):
+        return self.last_render_ms
+
+    @property
+    def last_render_ms(self):
+        return self._renderer.last_elapsed_ms if self._renderer is not None else None
+
+    @property
+    def last_render_error(self):
+        return self._renderer.last_error if self._renderer is not None else None
+
+    @property
+    def last_paint_ms(self):
+        """Paint callback duration, excluding compositor/monitor latency."""
+        return self._last_paint_ms
+
+    @property
+    def last_painted_at(self):
+        return self._last_painted_at
 
     def screen_geometry_changed(self, geometry):
         self.setGeometry(geometry)
-        self.blur_packet, self.blur_images = None, []
+        self._release_renderer()
         self.set_masks([], full=True)
 
     def set_effect(self, effect):
+        if effect.mode not in ('off', 'block', 'blur'):
+            raise ValueError('invalid mask effect')
+        self._release_renderer()
         self.effect = effect
-        self.blur_packet, self.blur_images = None, []
-        self.last_blur_request = self.blur_validated_image = None
-        if self.blur_worker:
-            self.blur_worker.close()
-            self.blur_worker = None
-        if effect.mode == 'blur':
-            self.blur_worker = BlurWorker()
         self.set_masks([], full=False)
 
     def set_masks(self, rectangles, full=False, image=None, padding=8, frame_image=None):
+        if self._closed:
+            return
         if frame_image is None:
             frame_image = image
+        previous = (self.rectangles, self.full, self.padding,
+                    tuple(self._fallback_boxes),
+                    tuple((box, id(qimage)) for box, qimage in self.blurs))
         self.mask_image = frame_image
-        padding_changed = self.padding != padding
         self.padding = padding
-        if self.effect.mode == 'off':
-            rectangles, full = [], False
-        changed = self.rectangles != rectangles or self.full != full or padding_changed
         self.rectangles, self.full = list(rectangles), bool(full)
-        if self.effect.mode == 'blur':
-            boxes = ([(0, 0, frame_image.shape[1], frame_image.shape[0])] if full and frame_image is not None
-                     else crop_boxes(frame_image, rectangles, margin=padding) if frame_image is not None else [])
-            packet = self.blur_worker.poll()
-            if packet is not None:
-                self.blur_packet = packet if 'error' not in packet else None
-                self.blur_validated_image = None
-            if (self.blur_packet is not None and frame_image is not None
-                    and self.blur_packet['boxes'] == boxes and self.blur_packet['radius'] == self.effect.radius):
-                if self.blur_validated_image is not frame_image:
-                    source = self.blur_packet['image']
-                    valid = source.shape == frame_image.shape and all(
-                        np.array_equal(source[y1:y2, x1:x2], frame_image[y1:y2, x1:x2])
-                        for x1, y1, x2, y2 in boxes)
-                    self.blur_validated_image = frame_image
-                    self.blur_images = []
-                    if valid:
-                        for box, bgr in self.blur_packet['patches']:
-                            rgb = np.ascontiguousarray(bgr[:, :, ::-1])
-                            height, width = rgb.shape[:2]
-                            qimage = QImage(rgb.data, width, height, rgb.strides[0], QImage.Format_RGB888).copy()
-                            self.blur_images.append((box, qimage))
-                        self.blur_ms = self.blur_packet['blur_ms']
-                    changed = True
-            else:
-                if self.blur_images:
-                    changed = True
-                self.blur_images = []
-                self.blur_validated_image = None
-            key = (id(frame_image), tuple(boxes), self.effect.radius)
-            if frame_image is not None and boxes and key != self.last_blur_request:
-                self.blur_worker.submit(frame_image, boxes, self.effect.radius)
-                self.last_blur_request = key
-        if changed:
+        if self.effect.mode == 'off':
+            self.rectangles, self.full = [], False
+            if self._renderer is not None:
+                self._renderer.clear()
+            self.blurs, self._fallback_boxes, self._qimages = [], [], {}
+        else:
+            try:
+                ratio = self.devicePixelRatioF()
+                shape = (frame_image.shape if frame_image is not None else
+                         (round(self.height()*ratio), round(self.width()*ratio)))
+                boxes = (((0, 0, int(shape[1]), int(shape[0])),) if self.full else
+                         mask_crops(self.rectangles, shape, padding))
+                if not boxes or self.effect.mode != 'blur' or frame_image is None:
+                    if self._renderer is not None:
+                        self._renderer.clear()
+                    ready, pending = [], list(boxes)
+                else:
+                    if self._renderer is None:
+                        self._renderer = BlurCache(radius=self.effect.radius)
+                    ready, pending = self._renderer.update(boxes, frame_image)
+                blurs, qimages = [], {}
+                for box, rgb in ready:
+                    cached = self._qimages.get(box)
+                    if cached is not None and cached[0] is rgb:
+                        qimage = cached[1]
+                    else:
+                        # QImage creation stays on the Qt/UI thread.
+                        qimage = QImage(rgb.data, rgb.shape[1], rgb.shape[0],
+                                        rgb.strides[0], QImage.Format_RGB888).copy()
+                    qimages[box] = (rgb, qimage)
+                    blurs.append((box, qimage))
+                self.blurs, self._qimages = blurs, qimages
+                self._fallback_boxes = list(pending)
+            except Exception:
+                # Invalid source/geometry never reveals content during protection.
+                self.full = True
+                self.blurs, self._fallback_boxes, self._qimages = [], [], {}
+                if self._renderer is not None:
+                    self._renderer.clear()
+        current = (self.rectangles, self.full, self.padding,
+                   tuple(self._fallback_boxes),
+                   tuple((box, id(qimage)) for box, qimage in self.blurs))
+        if current != previous:
             self.update()
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(20, 24, 32, 255))
-        if self.effect.mode == 'off':
-            return
-        if self.effect.mode == 'blur' and self.blur_images:
-            ratio = self.devicePixelRatioF()
-            for (x1, y1, x2, y2), image in self.blur_images:
-                painter.drawImage(QRectF(x1/ratio, y1/ratio, (x2-x1)/ratio, (y2-y1)/ratio), image)
-        elif self.full:
-            painter.drawRect(self.rect())
-        else:
-            # mss为物理像素；Qt窗口内坐标为逻辑像素。
-            ratio = self.devicePixelRatioF()
-            for x, y, width, height in self.rectangles:
-                painter.drawRect(QRectF((x-self.padding)/ratio, (y-self.padding)/ratio,
-                                       (width+2*self.padding)/ratio, (height+2*self.padding)/ratio))
+    def _release_renderer(self):
+        self.mask_image = None
+        self.blurs, self._qimages, self._fallback_boxes = [], {}, []
+        self.full = self.effect.mode != 'off'
+        if self._renderer is not None:
+            try:
+                self._renderer.close()
+            except Exception:
+                self.update()
+                raise
+            self._renderer = None
+
+    def close(self):
+        # Qt event callbacks do not reliably propagate Python exceptions to the
+        # caller. Release explicitly so pause can block restart after a timeout.
+        self._release_renderer()
+        return super().close()
+
+    def hideEvent(self, event):
+        self._release_renderer()
+        # A reused protected overlay waits for a fresh controller decision.
+        self.full = self.effect.mode != 'off'
+        super().hideEvent(event)
 
     def closeEvent(self, event):
-        if self.blur_worker:
-            self.blur_worker.close()
-            self.blur_worker = None
-        self.blur_packet, self.blur_images = None, []
-        event.accept()
+        self._closed = True
+        self._release_renderer()
+        super().closeEvent(event)
+
+    def paintEvent(self, event):
+        started = time.perf_counter()
+        painter = QPainter(self)
+        try:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(20, 24, 32, 255))
+            if self.effect.mode == 'off':
+                return
+            if self.full and not self.blurs:
+                painter.drawRect(self.rect())
+            else:
+                # mss uses physical pixels; Qt window coordinates are logical.
+                ratio = self.devicePixelRatioF()
+                for box in self._fallback_boxes:
+                    painter.drawRect(QRectF(*physical_to_logical(box, ratio)))
+                for box, image in self.blurs:
+                    painter.drawImage(QRectF(*physical_to_logical(box, ratio)), image)
+        finally:
+            painter.end()
+            self._last_paint_ms = (time.perf_counter()-started)*1000
+            self._last_painted_at = time.monotonic()

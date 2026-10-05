@@ -44,15 +44,109 @@ def with_context(lines, shape):
 
 
 def line_context(line,shape):
-    return line.get('_context',context_rect(line['polygon'],shape))
+    # dict.get 的默认参数也会执行，避免每次查询重新计算几何。
+    rectangle = line.get('_context')
+    return rectangle if rectangle is not None else context_rect(line['polygon'],shape)
+
+
+class _ExactDifference:
+    """一次精确差分，复用小型分块积分表和精确边缘查询。
+
+    对整个 RGB 数组沿第三轴归约较慢；逐通道 OR 保持相同的逐像素语义。
+    完整分块用积分表查询，边缘仅扫描差分掩码，不再反复比较源图。
+    """
+    def __init__(self, first, second, tile, tile_mask):
+        self.height, self.width = second.shape[:2]
+        self.tile = tile
+        self.cache = {}
+        self.mask = None
+        if first is not second:
+            mask = first[:, :, 0] != second[:, :, 0]
+            for channel in range(1,second.shape[2]):
+                np.logical_or(mask,first[:, :, channel] != second[:, :, channel],out=mask)
+            self.tiles = tile_mask(mask)
+            if self.tiles.any():
+                self.mask = mask
+        else:
+            self.tiles = np.zeros((math.ceil(self.height/tile),math.ceil(self.width/tile)),dtype=bool)
+        self.integral = np.zeros((self.tiles.shape[0]+1,self.tiles.shape[1]+1),dtype=np.int64)
+        if self.mask is not None:
+            np.cumsum(self.tiles,axis=0,dtype=np.int64,out=self.integral[1:,1:])
+            np.cumsum(self.integral[1:,1:],axis=1,dtype=np.int64,out=self.integral[1:,1:])
+
+    def _tile_count(self,x1,y1,x2,y2):
+        table = self.integral
+        return table[y2,x2]-table[y1,x2]-table[y2,x1]+table[y1,x1]
+
+    def changed(self,rectangle):
+        key = tuple(rectangle)
+        if key in self.cache:
+            return self.cache[key]
+        result = self._changed(key)
+        self.cache[key] = result
+        return result
+
+    def _changed(self,rectangle):
+        if self.mask is None:
+            return False
+        x1,y1,x2,y2 = rectangle
+        x1,y1 = max(0,int(x1)),max(0,int(y1))
+        x2,y2 = min(self.width,int(x2)),min(self.height,int(y2))
+        if x1>=x2 or y1>=y2:
+            return False
+        t = self.tile
+        if not self._tile_count(x1//t,y1//t,math.ceil(x2/t),math.ceil(y2/t)):
+            return False
+        left,top = math.ceil(x1/t)*t,math.ceil(y1/t)*t
+        right,bottom = (x2//t)*t,(y2//t)*t
+        if left>=right or top>=bottom:
+            return bool(self.mask[y1:y2,x1:x2].any())
+        if self._tile_count(left//t,top//t,right//t,bottom//t):
+            return True
+        return bool(self.mask[y1:top,x1:x2].any() or
+                    self.mask[bottom:y2,x1:x2].any() or
+                    self.mask[top:bottom,x1:left].any() or
+                    self.mask[top:bottom,right:x2].any())
+
+
+def _unknown_rectangles(regions,shape):
+    """OCR 提供的未完成覆盖为物理像素 xyxy，不能默默接受非法坐标。"""
+    result = []
+    for region in regions:
+        if len(region)!=4:
+            raise ValueError('unknown region must contain four coordinates')
+        x1,y1,x2,y2 = (float(value) for value in region)
+        if (not all(math.isfinite(value) for value in (x1,y1,x2,y2)) or
+                not 0<=x1<x2<=shape[1] or not 0<=y1<y2<=shape[0]):
+            raise ValueError('unknown region must be finite and inside the image')
+        result.append((math.floor(x1),math.floor(y1),math.ceil(x2),math.ceil(y2)))
+    return result
+
+
+def _intersects_unknown(rectangle,regions):
+    x1,y1,x2,y2 = rectangle
+    return any(x1<rx2 and rx1<x2 and y1<ry2 and ry1<y2 for rx1,ry1,rx2,ry2 in regions)
 
 
 class ContentIndex:
     def __init__(self, tile=64):
+        if not isinstance(tile,int) or isinstance(tile,bool) or tile<=0:
+            raise ValueError('tile must be a positive integer')
         self.tile = tile
         self.image, self.unknown = None, None
         self.hits = []
         self.lines = []
+        self._context_key, self._contexts = None, []
+
+    def _with_context(self,lines,shape):
+        # 邻近关系只取决于几何；文字仍使用本次结果，不能复用分类。
+        key = (shape[:2],tuple(tuple((float(x),float(y)) for x,y in line['polygon']) for line in lines))
+        if key!=self._context_key:
+            contexts = with_context(lines,shape)
+            self._contexts = [line['_context'] for line in contexts]
+            self._context_key = key
+            return contexts
+        return [{**line,'_context':rectangle} for line,rectangle in zip(lines,self._contexts)]
 
     def tiles(self, mask):
         h,w = mask.shape
@@ -70,11 +164,12 @@ class ContentIndex:
             self.hits = []
             self.lines = []
         else:
-            self.unknown |= self.tiles(np.any(self.image!=image, axis=2))
+            difference = _ExactDifference(self.image,image,self.tile,self.tiles)
+            self.unknown |= difference.tiles
             kept = []
             for hit in self.hits:
                 rect = padded_rect(hit['polygon'],image.shape)
-                if same_region(self.image,image,rect):
+                if not difference.changed(rect):
                     kept.append(hit)
                 else:
                     # 单个数字改变时，整条原敏感行临时覆盖，避免露出旧前缀。
@@ -83,38 +178,60 @@ class ContentIndex:
             kept_lines = []
             for line in self.lines:
                 rect = padded_rect(line['polygon'],image.shape)
-                if not same_region(self.image,image,line_context(line,image.shape)):
+                if difference.changed(line_context(line,image.shape)):
                     self.dirty_rect(rect)
-                if same_region(self.image,image,rect):
+                if not difference.changed(rect):
                     kept_lines.append(line)
             self.lines = kept_lines
         self.image = image
 
-    def accept(self, source, lines, semantic=None):
+    def accept(self, source, lines, semantic=None, unknown_regions=None):
         if self.image is None or source.shape != self.image.shape:
             return False
-        lines = with_context(lines,self.image.shape)
-        changed = self.tiles(np.any(source!=self.image, axis=2))
+        # 缺少覆盖信息的空结果不等于整个屏幕安全；明确 [] 才表示完整覆盖。
+        regions = (_unknown_rectangles(unknown_regions,self.image.shape) if unknown_regions is not None
+                   else [(0,0,self.image.shape[1],self.image.shape[0])] if not lines else [])
+        lines = self._with_context(lines,self.image.shape)
+        # 文字检测到框、但没有可判别的文字，也不能清除该行的保护。
+        regions += [padded_rect(line['polygon'],self.image.shape) for line in lines if not str(line['text']).strip()]
+        difference = _ExactDifference(source,self.image,self.tile,self.tiles)
+        changed = difference.tiles
         self.unknown &= changed
+        for rectangle in regions:
+            self.dirty_rect(rectangle)
         # 迟到结果只替换仍与其源画面一致的区域，不能删除新帧已确认的敏感行。
         accepted = [hit for hit in self.hits
-                    if not same_region(source,self.image,line_context(hit,self.image.shape))]
-        kept_lines = [line for line in self.lines
-                      if not same_region(source,self.image,line_context(line,self.image.shape))]
+                    if difference.changed(line_context(hit,self.image.shape))]
+        validity = {}
+        def valid(line):
+            rectangle = line_context(line,self.image.shape)
+            if rectangle not in validity:
+                validity[rectangle] = not difference.changed(rectangle) and not _intersects_unknown(rectangle,regions)
+            return validity[rectangle]
+        # 未识别的标签可能比值行大、离值更远。保留旧的依赖范围，不能让
+        # 缺失标签后的较小新上下文在下一次缓存结果中清掉整条值行的保护。
+        kept_lines = [line for line in self.lines if not valid(line)]
         for line in self.lines+lines:
-            if not same_region(source,self.image,line_context(line,self.image.shape)):
+            if not valid(line):
                 self.dirty_rect(padded_rect(line['polygon'],self.image.shape))
-        self.lines = kept_lines+[line for line in lines
-                                if same_region(source,self.image,line_context(line,self.image.shape))]
+        combined = kept_lines+[line for line in lines if valid(line)]
+        # Cached/late results can retain unresolved geometry; keep each exact
+        # dependency once so repeated results never accumulate duplicate lines.
+        unique = {}
+        for line in combined:
+            key = (tuple(tuple(point) for point in line['polygon']),
+                   tuple(line_context(line,self.image.shape)))
+            unique[key] = line
+        self.lines = list(unique.values())
         for hit in detect(lines,semantic):
             hit['_context'] = lines[hit['line_index']]['_context']
             rect = padded_rect(hit['polygon'],self.image.shape)
-            if same_region(source,self.image,line_context(hit,self.image.shape)):
+            if valid(hit):
                 accepted.append(hit)
             else:
                 self.dirty_rect(rect)
         self.hits = accepted
-        return bool((~changed).any())
+        return bool((~self.unknown).any())
 
     def pending_rectangles(self):
         if self.unknown is None:

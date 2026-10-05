@@ -3,9 +3,9 @@ import onnxruntime as ort
 import cv2
 import numpy as np
 import time
-from runtime_paths import desktop_root
 from gpu_adapter import preferred_adapter
 from rapidocr_onnxruntime import RapidOCR
+from runtime_paths import desktop_root
 
 
 class FastOCR:
@@ -51,6 +51,7 @@ class FastOCR:
             self.recognize_crops([np.full((48,width,3),255,dtype=np.uint8)])
 
     def recognize_crops(self,crops):
+        self.last_batches = []
         if not self.use_dml:
             return self.engine.text_rec(crops)[0]
         recognizer=self.engine.text_rec
@@ -61,6 +62,7 @@ class FastOCR:
             indices=order[start:start+4]
             width=max(320,max(int(np.ceil(48*crops[i].shape[1]/crops[i].shape[0])) for i in indices))
             bucket=next((w for w in (320,640,1280,2560) if w>=width),int(np.ceil(width/320))*320)
+            self.last_batches.append(bucket)
             batch=[recognizer.resize_norm_img(crops[i],bucket/48) for i in indices]
             batch.extend([batch[-1]]*(4-len(batch)))
             predictions=recognizer.session(np.stack(batch).astype(np.float32))[0]
@@ -71,8 +73,8 @@ class FastOCR:
 
     def recognize(self,image,preserve_scale=False):
         started=time.perf_counter()
-        self.last_timing = {'preprocess_ms': 0.0, 'detection_ms': 0.0, 'crop_ms': 0.0,
-                            'recognition_ms': 0.0}
+        self.last_timing = {'preprocess_ms':0.0,'detection_ms':0.0,'crop_ms':0.0,'recognition_ms':0.0}
+        self.last_batches = []
         height,width=image.shape[:2]
         bucket=next(((w,h) for w,h in self.buckets if width<=w and height<=h),self.buckets[-1])
         bw,bh=bucket
