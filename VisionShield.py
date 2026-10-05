@@ -6,6 +6,8 @@ import sys
 if __name__ == '__main__':
     multiprocessing.freeze_support()
     sys.path.insert(0, str(Path(__file__).resolve().parent/'视界盾桌面防护'))
+    from runtime_errors import install_exception_logging
+    install_exception_logging()
     try:
         if '--package-check' in sys.argv:
             from package_check import main
