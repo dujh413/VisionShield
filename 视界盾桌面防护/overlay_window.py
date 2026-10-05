@@ -32,6 +32,7 @@ class OverlayWindow(QWidget):
         self.full = False
         self.blurs = []
         self.mask_image = None
+        self.padding = 8
         self.show()
         exclude_capture(self)
 
@@ -39,9 +40,10 @@ class OverlayWindow(QWidget):
         self.setGeometry(geometry)
         self.set_masks([],full=True)
 
-    def set_masks(self, rectangles, full=False, image=None):
-        if self.mask_image is image and self.rectangles == rectangles and self.full == full:
+    def set_masks(self, rectangles, full=False, image=None, padding=8):
+        if self.mask_image is image and self.rectangles == rectangles and self.full == full and self.padding == padding:
             return
+        self.padding = padding
         self.mask_image = image
         self.rectangles, self.full = rectangles, full
         self.blurs = []
@@ -49,8 +51,8 @@ class OverlayWindow(QWidget):
             import cv2
             height,width = image.shape[:2]
             for x,y,w,h in rectangles:
-                x1,y1 = max(0,int(x)-8),max(0,int(y)-8)
-                x2,y2 = min(width,int(x+w)+8),min(height,int(y+h)+8)
+                x1,y1 = max(0,int(x)-padding),max(0,int(y)-padding)
+                x2,y2 = min(width,int(x+w)+padding),min(height,int(y+h)+padding)
                 if x2<=x1 or y2<=y1:
                     continue
                 roi = image[y1:y2,x1:x2]
@@ -78,5 +80,5 @@ class OverlayWindow(QWidget):
                     painter.drawImage(QRectF(x/ratio,y/ratio,width/ratio,height/ratio),image)
                 return
             for x, y, width, height in self.rectangles:
-                painter.drawRect(QRectF((x-6)/ratio, (y-6)/ratio,
-                                       (width+12)/ratio, (height+12)/ratio))
+                painter.drawRect(QRectF((x-self.padding)/ratio, (y-self.padding)/ratio,
+                                       (width+self.padding*2)/ratio, (height+self.padding*2)/ratio))

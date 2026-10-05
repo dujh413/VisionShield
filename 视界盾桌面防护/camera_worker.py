@@ -16,7 +16,7 @@ def camera_main(root, stop, outputs, preview=False):
         from identity_test import load_models, extract
         from camera_test import open_camera
         from owner_tracking import ShortTracker
-        from identity_state import IdentityGate
+        from owner_presence import OwnerPresence, frontal_face
         from ocr_worker import put_latest
         cv2.setNumThreads(1)
         detector, recognizer = load_models(Path(root))
@@ -27,7 +27,7 @@ def camera_main(root, stop, outputs, preview=False):
                 templates = data['features'].copy()
             if templates.ndim != 2 or not len(templates) or not np.isfinite(templates).all():
                 raise ValueError('Invalid owner template')
-        tracker, gate = ShortTracker(), IdentityGate()
+        tracker, presence = ShortTracker(), OwnerPresence()
         camera = open_camera(0, 'auto')
         sequence = 0
         started = time.monotonic()
@@ -43,7 +43,7 @@ def camera_main(root, stop, outputs, preview=False):
             boxes = [(float(f[0])/width, float(f[1])/height,
                       float(f[0]+f[2])/width, float(f[1]+f[3])/height) for f in faces]
             tracks = tracker.update(boxes, int((before-started)*1000))
-            matches = []
+            observations = []
             scores = []
             if templates is not None:
                 for track, face in zip(tracks, faces):
@@ -51,13 +51,12 @@ def camera_main(root, stop, outputs, preview=False):
                     score = float(np.max(templates@feature)) if feature is not None else None
                     if score is not None:
                         scores.append(score)
-                    if track.reliable and score is not None and score >= .45:
-                        matches.append(track.track_id)
-            verified = gate.update(matches[0] if len(matches) == 1 else None)
+                    observations.append({'track_id':track.track_id, 'reliable':track.reliable,
+                                         'bbox':track.bbox, 'score':score, 'frontal':frontal_face(face)})
+            identity = presence.update(before, observations, enrolled=templates is not None)
             sequence += 1
             item = {'sequence':sequence, 'observed_at':before,
-                       'owner_verified':verified, 'faces_count':len(faces),
-                       'protect_request':not verified or len(faces)!=1,
+                       **identity, 'faces_count':len(faces),
                        'enrolled':templates is not None}
             if preview:
                 item['brightness'] = round(float(image.mean()),1)
@@ -108,7 +107,9 @@ class CameraWorker:
         if not self.last['enrolled']:
             return True, '请先在设置中登记机主'
         risk = self.last['protect_request']
-        reason = '检测到旁人' if self.last['faces_count']>1 else '机主未确认' if risk else '机主独处且已确认'
+        reason = ('检测到陌生人或旁人' if self.last.get('stranger_detected') else
+                  '机主短时姿态宽限' if self.last.get('pose_grace') else
+                  '机主未确认' if risk else '机主独处且已确认')
         return risk, reason
 
     def close(self):

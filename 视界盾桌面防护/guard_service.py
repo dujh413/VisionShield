@@ -10,7 +10,11 @@ def status_payload(panel):
     return {'state':'running' if panel.timer.isActive() and not failed else 'error',
             'detail':panel.status.text(), 'alert':panel.alert_message,
             'sensitive_lines':len(panel.hits), 'protecting':panel.protecting,
+            'shield_enabled':bool(panel.shield_enabled),
             'owner_verified':bool(camera and camera['owner_verified']),
+            'owner_session_active':bool(camera and camera.get('owner_session_active',False)),
+            'pose_grace':bool(camera and camera.get('pose_grace',False)),
+            'stranger_detected':bool(camera and camera.get('stranger_detected',False)),
             'faces_count':camera['faces_count'] if camera else None,
             'full_mask':panel.overlay.full if panel.overlay else False,
             'blur_regions':len(panel.overlay.blurs) if panel.overlay else 0}
@@ -36,16 +40,32 @@ def main():
         return 1
     stop_requested = False
     command_buffer = b''
+    pending_preferences = {}
+    applying_preferences = False
 
     def request_stop():
         nonlocal stop_requested
         stop_requested = True
 
     def read_commands():
-        nonlocal command_buffer
-        command_buffer = (command_buffer+bytes(socket.readAll()))[-64:]
-        if b'stop' in command_buffer:
+        nonlocal command_buffer, pending_preferences
+        command_buffer = (command_buffer+bytes(socket.readAll()))[-65536:]
+        # 兼容旧版无换行stop；新版JSON逐行处理，支持拆包和多次修改。
+        if command_buffer == b'stop':
             request_stop()
+            command_buffer = b''
+        while b'\n' in command_buffer:
+            line, command_buffer = command_buffer.split(b'\n', 1)
+            if line == b'stop':
+                request_stop()
+                continue
+            try:
+                value = json.loads(line)
+            except (ValueError, UnicodeError):
+                continue
+            if isinstance(value, dict) and not stop_requested:
+                pending_preferences.update(value)
+
 
     socket.readyRead.connect(read_commands)
     socket.disconnected.connect(request_stop)
@@ -54,20 +74,29 @@ def main():
     initialized = False
 
     def start():
-        nonlocal initialized
+        nonlocal initialized, pending_preferences
         if not stop_requested:
+            panel.apply_preferences(pending_preferences)
+            pending_preferences = {}
             panel.start()
         initialized = True
 
     def tick():
-        nonlocal last_status
+        nonlocal last_status, pending_preferences, applying_preferences
         # 启动探针会运行嵌套Qt事件循环，尚未启动控制定时器不代表异常。
-        if not initialized:
+        if not initialized or applying_preferences:
             return
         if stop_requested:
             panel.pause()
             app.quit()
             return
+        if pending_preferences:
+            preferences, pending_preferences = pending_preferences, {}
+            applying_preferences = True
+            try:
+                panel.apply_preferences(preferences)
+            finally:
+                applying_preferences = False
         payload = status_payload(panel)
         snapshot = status_snapshot(payload)
         alert = payload['alert']
