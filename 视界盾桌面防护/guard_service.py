@@ -16,8 +16,8 @@ def status_payload(panel):
             'pose_grace':bool(camera and camera.get('pose_grace',False)),
             'stranger_detected':bool(camera and camera.get('stranger_detected',False)),
             'faces_count':camera['faces_count'] if camera else None,
-            'full_mask':panel.overlay.full if panel.overlay else False,
-            'blur_regions':len(panel.overlay.blurs) if panel.overlay else 0}
+            'full_mask':bool(panel.overlay and panel.overlay.isVisible() and panel.overlay.full),
+            'blur_regions':len(panel.overlay.blurs) if panel.overlay and panel.overlay.isVisible() else 0}
 
 
 def status_snapshot(payload):
