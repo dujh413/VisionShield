@@ -21,6 +21,8 @@ class Frame:
     captured_at: float
     monitor_rect: dict
     image: np.ndarray
+    capture_ms: float = 0.0
+    submitted_at: float = 0.0
 
 
 class ScreenCapture:
@@ -38,7 +40,7 @@ class ScreenCapture:
         started=time.monotonic()
         self.sequence += 1
         image = np.asarray(self.source.grab(self.monitor))[:, :, :3].copy()
-        return Frame(self.sequence, started, self.monitor, image)
+        return Frame(self.sequence, started, self.monitor, image, (time.monotonic()-started)*1000)
 
     def close(self):
         self.source.close()
