@@ -4,6 +4,22 @@ import os
 import sys
 
 
+def status_payload(panel):
+    failed = panel.error or (panel.camera.error if panel.camera else None)
+    camera = panel.camera.last if panel.camera else None
+    return {'state':'running' if panel.timer.isActive() and not failed else 'error',
+            'detail':panel.status.text(), 'alert':panel.alert_message,
+            'sensitive_lines':len(panel.hits), 'protecting':panel.protecting,
+            'owner_verified':bool(camera and camera['owner_verified']),
+            'faces_count':camera['faces_count'] if camera else None,
+            'full_mask':panel.overlay.full if panel.overlay else False,
+            'blur_regions':len(panel.overlay.blurs) if panel.overlay else 0}
+
+
+def status_snapshot(payload):
+    return tuple((key, value) for key, value in payload.items() if key != 'alert')
+
+
 def main():
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
@@ -33,12 +49,14 @@ def main():
 
     socket.readyRead.connect(read_commands)
     socket.disconnected.connect(request_stop)
+    read_commands()  # waitForConnected期间到达的停止指令不能丢失。
     last_status = None
     initialized = False
 
     def start():
         nonlocal initialized
-        panel.start()
+        if not stop_requested:
+            panel.start()
         initialized = True
 
     def tick():
@@ -50,19 +68,11 @@ def main():
             panel.pause()
             app.quit()
             return
-        status = panel.status.text()
-        failed = panel.error or (panel.camera.error if panel.camera else None)
-        state = 'running' if panel.timer.isActive() and not failed else 'error'
-        snapshot = (state, status, len(panel.hits))
-        alert = panel.alert_message
+        payload = status_payload(panel)
+        snapshot = status_snapshot(payload)
+        alert = payload['alert']
         if snapshot != last_status or alert:
-            packet = 'VISION_SHIELD:'+json.dumps({'state': state, 'detail': status,
-                  'alert':alert,'sensitive_lines':len(panel.hits),
-                  'protecting':panel.protecting,
-                  'owner_verified':bool(panel.camera and panel.camera.last and panel.camera.last['owner_verified']),
-                  'faces_count':panel.camera.last['faces_count'] if panel.camera and panel.camera.last else None,
-                  'full_mask':panel.overlay.full if panel.overlay else False,
-                  'blur_regions':len(panel.overlay.blurs) if panel.overlay else 0}, ensure_ascii=True)+'\n'
+            packet = 'VISION_SHIELD:'+json.dumps(payload, ensure_ascii=True)+'\n'
             socket.write(packet.encode('utf-8'))
             socket.flush()
             last_status = snapshot
