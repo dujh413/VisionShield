@@ -28,11 +28,35 @@ def valid_profiles(value):
     result={}
     if not isinstance(value,dict):
         return result
-    for key,profile in list(value.items())[:100]:
+    for key,profile in list(value.items())[:20]:
         if not isinstance(key,str) or len(key)>256 or not isinstance(profile,dict):
             continue
         if profile.get('mode')=='window':
             result[key]={'mode':'window'}
+        elif profile.get('mode')=='tracked':
+            from region_features import valid_features
+            anchor=profile.get('anchor');binding=profile.get('binding')
+            if not isinstance(anchor,dict) or anchor.get('type') not in ('native','uia','visual'):continue
+            kind=anchor['type'];clean={'type':kind}
+            if kind!='visual':
+                import math
+                part=anchor.get('fraction')
+                if not isinstance(part,list) or len(part)!=4 or not all(type(v) in (int,float) and math.isfinite(v) and 0<=v<=1 for v in part) or min(part[2:])<=0 or part[0]+part[2]>1.00001 or part[1]+part[3]>1.00001:continue
+                clean['fraction']=part
+            if kind=='native':
+                if not isinstance(anchor.get('class'),str) or len(anchor['class'])>128 or type(anchor.get('id')) is not int:continue
+                clean.update({'class':anchor['class'],'id':anchor['id']})
+                if type(anchor.get('handle')) is int and 0<anchor['handle']<2**64:clean['handle']=anchor['handle']
+            if kind=='uia':
+                path=anchor.get('path')
+                if not isinstance(path,list) or not 1<=len(path)<=12 or any(not isinstance(s,dict) or type(s.get('kind')) is not int or not isinstance(s.get('class'),str) or len(s['class'])>128 or not isinstance(s.get('id'),str) or len(s['id'])>96 for s in path):continue
+                clean['path']=[{'kind':s['kind'],'class':s['class'],'id':s['id']} for s in path]
+            entry={'mode':'tracked','anchor':clean}
+            if isinstance(binding,dict) and all(type(binding.get(k)) is int and 0<binding[k]<2**64 for k in ('handle','pid')):
+                entry['binding']={'handle':binding['handle'],'pid':binding['pid']}
+            features=valid_features(profile.get('features'))
+            if features is not None:entry['features']=features
+            result[key]=entry
         elif profile.get('mode')=='chat':
             region,size=profile.get('region'),profile.get('size')
             if (isinstance(region,list) and len(region)==4 and isinstance(size,list) and len(size)==2
@@ -43,7 +67,15 @@ def valid_profiles(value):
     return result
 
 
-def application_masks(windows, rectangles, uncertain, profiles=None):
+def stored_profiles(profiles):
+    """持久化控件结构；视觉描述子和本次窗口句柄不落盘。"""
+    result={key:{k:v for k,v in profile.items() if k not in ('features','binding')} for key,profile in valid_profiles(profiles).items()}
+    for profile in result.values():
+        if 'anchor' in profile:profile['anchor']={k:v for k,v in profile['anchor'].items() if k!='handle'}
+    return result
+
+
+def application_masks(windows, rectangles, uncertain, profiles=None, resolved=None):
     profiles=valid_profiles(profiles or {})
     if not windows:
         # 枚举失败或未能取得应用边界时不能以空结果恢复。
@@ -54,17 +86,25 @@ def application_masks(windows, rectangles, uncertain, profiles=None):
         if profile and mode != 'ignore':
             mode=profile['mode']
         scope=rect
+        if mode=='tracked':
+            match=(resolved or {}).get(window['key'])
+            if match and match['handle']==window['handle'] and match['rect'] is not None:
+                scope=intersect(match['rect'],rect) or rect
+            elif profile.get('binding') and profile['binding']['handle']!=window['handle']:
+                mode=window['mode']
+            # 同一应用的另一窗口不继承选区；目标失配时整窗保护。
+            else:scope=rect
         if mode=='chat':
             scope=rect
             client=window['client']
-            if profile and profile.get('mode')=='chat':
+            if profile and profile.get('mode')=='chat' and resolved is None:
                 cw,ch=client[2:]
                 expected=profile['size']
                 if abs(cw-expected[0])<=max(2,expected[0]*.02) and abs(ch-expected[1])<=max(2,expected[1]*.02):
                     x,y,width,height=profile['region']
                     scope=(client[0]+x*cw,client[1]+y*ch,width*cw,height*ch)
             # 无有效校准时整应用保护，不猜对话区域。
-        selected=([scope] if mode in ('window','chat') else
+        selected=([scope] if mode in ('window','chat','tracked') else
                   [rect] if uncertain and mode!='ignore' else
                   [clip for candidate in rectangles if (clip:=intersect(candidate,rect))] if mode!='ignore' else [])
         for cover in covers:
@@ -118,7 +158,7 @@ def window_inventory(monitor, excluded_pids=None):
             user.GetClientRect(handle,ctypes.byref(client));user.ClientToScreen(handle,ctypes.byref(origin))
             mode=('ignore' if pid.value in excluded or cls.value in ('Progman','WorkerW','Shell_TrayWnd','Shell_SecondaryTrayWnd') else
                   'chat' if exe in CHAT else 'window' if exe in WHOLE else 'lines')
-            result.append({'handle':int(handle),'key':exe+'|'+cls.value,'mode':mode,'rect':clipped,
+            result.append({'handle':int(handle),'pid':pid.value,'key':exe+'|'+cls.value,'mode':mode,'rect':clipped,
                            'client':(origin.x-monitor['left'],origin.y-monitor['top'],client.right,client.bottom)})
         except (OSError,ValueError):pass
         return True

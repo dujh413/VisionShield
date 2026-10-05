@@ -109,6 +109,10 @@ def main():
         screen = app.primaryScreen().geometry()
         read_window(int(panel.winId()), {'left':screen.x(), 'top':screen.y(), 'width':screen.width(), 'height':screen.height()})
         checks['native_text_dependencies'] = True
+        panel.hide()
+        app.processEvents()
+        from region_package_check import check
+        result['region_tracking'] = check(app)
     except Exception:
         import traceback
         result['diagnostic_error'] = traceback.format_exc()
@@ -116,6 +120,6 @@ def main():
         panel.hide()
         temp.cleanup()
         result['completed_cycles'] = cycles
-        result['passed'] = len(checks) == 11 and all(checks.values()) and not result.get('service_error') and not result.get('diagnostic_error')
+        result['passed'] = len(checks) == 11 and all(checks.values()) and result.get('region_tracking', {}).get('passed') is True and not result.get('service_error') and not result.get('diagnostic_error')
         destination.write_text(json.dumps(result, ensure_ascii=True, indent=2), encoding='utf-8')
     return 0 if result['passed'] else 1
