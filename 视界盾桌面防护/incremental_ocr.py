@@ -52,4 +52,3 @@ class IncrementalOCR:
             self.last_full_at = started
         return lines, {'mode': mode, 'area_ratio': ratio, 'regions_count': len(boxes) if partial else 1,
                        'diff_ms': diff_ms, 'unknown_regions': unknown}
-

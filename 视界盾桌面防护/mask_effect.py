@@ -1,7 +1,6 @@
 """Start-button settings and a separable box mean filter, without GUI dependencies."""
 from dataclasses import dataclass
 import unicodedata
-import numpy as np
 
 
 @dataclass(frozen=True)
@@ -25,6 +24,7 @@ def parse_effect(text):
 
 
 def _mean_axis(image, radius, axis):
+    import numpy as np
     data = np.moveaxis(image, axis, 0).astype(np.float64)
     size = len(data)
     prefix = np.concatenate((np.zeros_like(data[:1]), np.cumsum(data, axis=0)), axis=0)
@@ -45,6 +45,7 @@ def _mean_axis(image, radius, axis):
 
 def box_blur(image, radius):
     """Uniform (2r+1)^2 filter with replicated edges; input stays unchanged."""
+    import numpy as np
     if type(radius) is not int or radius < 0:
         raise ValueError('Box radius must be a non-negative integer')
     if image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:

@@ -1,5 +1,6 @@
 """仅处理内存文字。结果含类别/理由/框，默认日志不包含原文。"""
 import re
+import math
 import unicodedata
 from datetime import datetime
 
@@ -82,11 +83,10 @@ def detect(lines, semantic=None):
                     # 最近的一个值行；地址多行覆盖仍需后续场景评估。
                     add(min(candidates)[1], category, '邻近标签关联')
         # 低置信度不能当作安全文字；未知内容保守覆盖。
-        if not text or line['confidence'] < 0.65:
+        if not text or not math.isfinite(line['confidence']) or not 0.65 <= line['confidence'] <= 1.0:
             add(i, '无法确定', '空识别文字' if not text else '低OCR置信度')
         if semantic is not None:
             label, score = semantic.classify(text)
             if label != '普通聊天':
                 add(i, label, '实验语义分类')
     return list(hits.values())
-

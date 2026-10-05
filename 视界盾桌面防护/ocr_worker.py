@@ -76,8 +76,8 @@ def recognize(ocr, image, preserve_scale=False):
               'polygon': polygon.tolist() if hasattr(polygon, 'tolist') else polygon}
              for text, score, polygon in zip(texts, scores, polygons)]
     # 未被识别输出覆盖的检测框也不能直接当安全。
-    if not lines:
-        for polygon in result.get('dt_polys', []):
+    for polygon in result.get('dt_polys', []):
+        if not any(np.array_equal(polygon,line['polygon']) for line in lines):
             lines.append({'text': '', 'confidence': 0.0,
                           'polygon': polygon.tolist() if hasattr(polygon, 'tolist') else polygon})
     return lines
@@ -164,9 +164,10 @@ class OCRWorker:
     def close(self):
         self.process.terminate()
         self.process.join(timeout=2)
+        if self.process.is_alive():
+            raise TimeoutError("OCR进程未停止")
         # 强制停止子进程时，不等待仍含屏幕图像的队列馈送线程。
         self.inputs.cancel_join_thread()
         self.outputs.cancel_join_thread()
         self.inputs.close()
         self.outputs.close()
-

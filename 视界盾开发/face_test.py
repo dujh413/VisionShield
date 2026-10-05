@@ -1,6 +1,7 @@
 """同步多人关键点测试：帧序号不是人物身份；默认不保存原始画面。"""
 import argparse
 import csv
+from collections import deque
 from datetime import datetime
 import json
 from pathlib import Path
@@ -41,7 +42,7 @@ def main():
     name = "A - Multi-Face Test"
     camera = None
     count, max_seen, last_ms = 0, 0, -1
-    inference_times = []
+    inference_times = deque(maxlen=10000)
     error_message = None
     start = None
     actual_resolution = None
@@ -105,6 +106,8 @@ def main():
             "camera": args.camera, "backend": args.backend, "actual_resolution": actual_resolution,
             "frames": count, "max_faces_seen": max_seen,
             "median_inference_ms": statistics.median(inference_times) if inference_times else None,
+            "timing_samples": len(inference_times),
+            "timing_scope": "latest 10000 frames (bounded memory)",
             "status": "error" if error_message else "completed",
             "error": error_message, "log": str(log_path),
             "raw_images_saved": False,

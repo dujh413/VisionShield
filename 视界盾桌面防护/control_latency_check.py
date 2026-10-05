@@ -81,4 +81,3 @@ if __name__=='__main__':
     print(json.dumps({'samples':len(values),'median_ipc_to_qt_paint_ms':round(statistics.median(values),1),
                       'p95_ms':round(values[18],1),'max_ms':round(max(values),1),
                       'scope':'fictional_window_not_real_desktop_or_camera'}))
-
