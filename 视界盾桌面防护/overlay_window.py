@@ -30,6 +30,9 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setGeometry(screen.geometry())
+        screen.geometryChanged.connect(self.screen_geometry_changed)
+        self.padding = 8
+        self.mask_image = None
         self.rectangles = []
         self.full = False
         self.effect = MaskEffect('block')
@@ -42,6 +45,15 @@ class OverlayWindow(QWidget):
         self.show()
         exclude_capture(self)
 
+    @property
+    def blurs(self):
+        return [((a,b,c-a,d-b),image) for (a,b,c,d),image in self.blur_images]
+
+    def screen_geometry_changed(self, geometry):
+        self.setGeometry(geometry)
+        self.blur_packet, self.blur_images = None, []
+        self.set_masks([], full=True)
+
     def set_effect(self, effect):
         self.effect = effect
         self.blur_packet, self.blur_images = None, []
@@ -53,14 +65,19 @@ class OverlayWindow(QWidget):
             self.blur_worker = BlurWorker()
         self.set_masks([], full=False)
 
-    def set_masks(self, rectangles, full=False, frame_image=None):
+    def set_masks(self, rectangles, full=False, image=None, padding=8, frame_image=None):
+        if frame_image is None:
+            frame_image = image
+        self.mask_image = frame_image
+        padding_changed = self.padding != padding
+        self.padding = padding
         if self.effect.mode == 'off':
             rectangles, full = [], False
-        changed = self.rectangles != rectangles or self.full != full
+        changed = self.rectangles != rectangles or self.full != full or padding_changed
         self.rectangles, self.full = list(rectangles), bool(full)
         if self.effect.mode == 'blur':
             boxes = ([(0, 0, frame_image.shape[1], frame_image.shape[0])] if full and frame_image is not None
-                     else crop_boxes(frame_image, rectangles) if frame_image is not None else [])
+                     else crop_boxes(frame_image, rectangles, margin=padding) if frame_image is not None else [])
             packet = self.blur_worker.poll()
             if packet is not None:
                 self.blur_packet = packet if 'error' not in packet else None
@@ -110,8 +127,8 @@ class OverlayWindow(QWidget):
             # mss为物理像素；Qt窗口内坐标为逻辑像素。
             ratio = self.devicePixelRatioF()
             for x, y, width, height in self.rectangles:
-                painter.drawRect(QRectF((x-6)/ratio, (y-6)/ratio,
-                                       (width+12)/ratio, (height+12)/ratio))
+                painter.drawRect(QRectF((x-self.padding)/ratio, (y-self.padding)/ratio,
+                                       (width+2*self.padding)/ratio, (height+2*self.padding)/ratio))
 
     def closeEvent(self, event):
         if self.blur_worker:
@@ -119,4 +136,3 @@ class OverlayWindow(QWidget):
             self.blur_worker = None
         self.blur_packet, self.blur_images = None, []
         event.accept()
-

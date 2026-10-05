@@ -16,7 +16,7 @@ def main():
     name = 'Step 3 - Primary Screen Preview (Q/Esc exit)'
     start = time.monotonic()
     next_capture = start
-    frames, durations, intervals = 0, [], []
+    frames, duration_total, interval_total = 0, 0.0, 0.0
     last_at = None
     try:
         print('Primary monitor:', json.dumps(capture.monitor))
@@ -32,9 +32,9 @@ def main():
                 if frame.image.shape != expected or frame.image.dtype.name != 'uint8':
                     raise RuntimeError(f'Unexpected image shape/dtype: {frame.image.shape}, {frame.image.dtype}')
                 if last_at is not None:
-                    intervals.append((frame.captured_at-last_at)*1000)
+                    interval_total += (frame.captured_at-last_at)*1000
                 last_at = frame.captured_at
-                durations.append(elapsed_ms)
+                duration_total += elapsed_ms
                 frames += 1
                 next_capture = before + 0.5
                 if args.check:
@@ -72,8 +72,8 @@ def main():
         if not args.check:
             cv2.destroyAllWindows()
         print(json.dumps({'frames': frames, 'elapsed_seconds': round(time.monotonic()-start, 2),
-                          'mean_capture_ms': round(sum(durations)/len(durations),2) if durations else None,
-                          'mean_interval_ms': round(sum(intervals)/len(intervals),2) if intervals else None,
+                          'mean_capture_ms': round(duration_total/frames,2) if frames else None,
+                          'mean_interval_ms': round(interval_total/(frames-1),2) if frames>1 else None,
                           'images_saved': False, 'ocr_started': False, 'camera_started': False}, indent=2))
 
 

@@ -1,0 +1,10 @@
+# 生产默认ONNX流程；不打入实验Paddle或MediaPipe。
+pyinstaller==6.20.0
+PySide6==6.11.2
+numpy==2.3.5
+opencv-python==4.10.0.84
+mss==10.2.0
+rapidocr_onnxruntime==1.4.4
+onnxruntime-directml==1.24.4
+uiautomation==2.0.29
+comtypes==1.4.17

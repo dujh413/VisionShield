@@ -35,15 +35,19 @@ def visible_windows(monitor, excluded_pids=()):
     return result
 
 
-def range_lines(pattern,auto,deadline):
+def range_lines(pattern,auto,deadline,status=None):
+    status={} if status is None else status
     start,end=auto.TextPatternRangeEndpoint.Start,auto.TextPatternRangeEndpoint.End
     for visible in pattern.GetVisibleRanges():
         cursor=visible.Clone()
         cursor.MoveEndpointByRange(end,visible,start,waitTime=0)
         cursor.ExpandToEnclosingUnit(auto.TextUnit.Line)
         for _ in range(80):
-            if time.monotonic()>deadline or cursor.CompareEndpoints(start,visible,end)>=0:
+            if time.monotonic()>deadline:
+                status['truncated']=True
                 return
+            if cursor.CompareEndpoints(start,visible,end)>=0:
+                break
             part=cursor.Clone()
             if part.CompareEndpoints(start,visible,start)<0:
                 part.MoveEndpointByRange(start,visible,start,waitTime=0)
@@ -55,9 +59,12 @@ def range_lines(pattern,auto,deadline):
                     yield text,(rect.left,rect.top,rect.right,rect.bottom)
             if cursor.Move(auto.TextUnit.Line,1,waitTime=0)!=1:
                 break
+        else:
+            status['truncated']=True
 
 
-def native_edit_lines(handle,deadline):
+def native_edit_lines(handle,deadline,status=None):
+    status={} if status is None else status
     """标准Windows Edit的可见行消息接口，不读取整个文档。"""
     user=ctypes.windll.user32
     user.GetClassNameW.argtypes=[wintypes.HWND,wintypes.LPWSTR,ctypes.c_int]
@@ -86,6 +93,7 @@ def native_edit_lines(handle,deadline):
     count=message(0x00BA)  # EM_GETLINECOUNT
     for number in range(first,min(count,first+80)):
         if time.monotonic()>deadline:
+            status['truncated']=True
             return
         index=message(0x00BB,number)  # EM_LINEINDEX
         packed=message(0x00D6,index)  # EM_POSFROMCHAR
@@ -106,13 +114,17 @@ def native_edit_lines(handle,deadline):
         if text and y+line_height>0:
             yield text,(origin.x,origin.y+max(0,y),origin.x+client.right,
                         origin.y+min(client.bottom,y+line_height))
+    else:
+        if count>first+80:
+            status['truncated']=True
 
 
 def read_window(handle,monitor,budget=.35):
     started=time.perf_counter()
     deadline=time.monotonic()+budget
     screen=(monitor['left'],monitor['top'],monitor['left']+monitor['width'],monitor['top']+monitor['height'])
-    native=list(native_edit_lines(handle,deadline))
+    native_status={}
+    native=list(native_edit_lines(handle,deadline,native_status))
     if native:
         lines=[]
         for text,rect in native:
@@ -122,7 +134,7 @@ def read_window(handle,monitor,budget=.35):
                 lines.append({'text':text,'confidence':1.0,'source':'win32_visible_line',
                               'polygon':[[x1-screen[0],y1-screen[1]],[x2-screen[0],y1-screen[1]],
                                          [x2-screen[0],y2-screen[1]],[x1-screen[0],y2-screen[1]]]})
-        return {'lines':lines,'read_ms':(time.perf_counter()-started)*1000,'truncated':False,
+        return {'lines':lines,'read_ms':(time.perf_counter()-started)*1000,'truncated':bool(native_status.get('truncated')),
                 'errors':0,'nodes':1,'control_types':['native_edit']}
     import uiautomation as auto
     root=auto.ControlFromHandle(handle)
@@ -130,7 +142,7 @@ def read_window(handle,monitor,budget=.35):
     lines=[]
     visited=0
     errors=0
-    truncated=False
+    truncated=bool(native_status.get('truncated'))
     controls=[]
     while nodes and visited<100 and time.monotonic()<deadline:
         control=nodes.popleft()
@@ -144,7 +156,9 @@ def read_window(handle,monitor,budget=.35):
             box=intersect((rect.left,rect.top,rect.right,rect.bottom),screen)
             if box is None:
                 continue
-            native=list(native_edit_lines(control.NativeWindowHandle,deadline)) if kind==auto.ControlType.EditControl and control.NativeWindowHandle else []
+            native_status={}
+            native=list(native_edit_lines(control.NativeWindowHandle,deadline,native_status)) if kind==auto.ControlType.EditControl and control.NativeWindowHandle else []
+            truncated |= bool(native_status.get('truncated'))
             if native:
                 for text,bounds in native:
                     clipped=intersect(bounds,box)
@@ -157,7 +171,8 @@ def read_window(handle,monitor,budget=.35):
             pattern=(control.GetPattern(auto.PatternId.TextPattern)
                      if kind in (auto.ControlType.DocumentControl,auto.ControlType.EditControl) else None)
             if pattern:
-                for text,bounds in range_lines(pattern,auto,deadline):
+                text_status={}
+                for text,bounds in range_lines(pattern,auto,deadline,text_status):
                     clipped=intersect(bounds,box)
                     if clipped:
                         x1,y1,x2,y2=clipped
@@ -165,6 +180,7 @@ def read_window(handle,monitor,budget=.35):
                         y1-=monitor['top']; y2-=monitor['top']
                         lines.append({'text':text,'confidence':1.0,'source':'uia_text',
                                       'polygon':[[x1,y1],[x2,y1],[x2,y2],[x1,y2]]})
+                truncated |= bool(text_status.get('truncated'))
                 # 父文本模式已提供文字；不重复遍历其文本子节点。
                 if time.monotonic()>deadline:
                     truncated=True

@@ -36,6 +36,10 @@ class SensitiveTests(unittest.TestCase):
     def test_low_confidence_is_unknown(self):
         self.assertEqual(categories([line('模糊文字',confidence=.3)]),{'无法确定'})
 
+    def test_nonfinite_or_invalid_confidence_cannot_be_safe(self):
+        for confidence in (float('nan'),float('inf'),-1,2):
+            self.assertEqual(categories([line('模糊文字',confidence=confidence)]),{'无法确定'})
+
     def test_empty_recognition_is_unknown_even_with_high_confidence(self):
         self.assertEqual(categories([line('  ',confidence=.99)]),{'无法确定'})
 
@@ -56,4 +60,3 @@ class SensitiveTests(unittest.TestCase):
 
 if __name__=='__main__':
     unittest.main()
-

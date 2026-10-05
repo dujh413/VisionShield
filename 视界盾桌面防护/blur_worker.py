@@ -15,7 +15,9 @@ def crop_boxes(image, rectangles, margin=6):
                min(width, math.ceil(x + w) + margin), min(height, math.ceil(y + h) + margin))
         if box[2] > box[0] and box[3] > box[1]:
             boxes.append(box)
-    return merge_boxes(boxes)
+    # Application masks can form an L around an excluded foreground window.
+    # A bounding union would fill that hole and cover outside the chosen scope.
+    return list(dict.fromkeys(boxes)) if margin == 0 else merge_boxes(boxes)
 
 
 def render_blur(image, boxes, radius):

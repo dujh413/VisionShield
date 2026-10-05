@@ -21,8 +21,21 @@ def load_models(root):
     empty = np.empty(0, dtype=np.uint8)
     detector = cv2.FaceDetectorYN.create(
         'onnx', detector_buffer, empty, (640, 480), 0.9)
-    recognizer = cv2.FaceRecognizerSF.create(
-        'onnx', recognizer_buffer, empty)
+    try:
+        recognizer = cv2.FaceRecognizerSF.create('onnx', recognizer_buffer, empty)
+    except TypeError:
+        # 较旧OpenCV仅支持文件参数；本机模型缓存使用英文路径。
+        import os
+        import shutil
+        cache = Path(os.environ.get('LOCALAPPDATA', str(Path.home())))/'VisionShield/face_models'
+        cache.mkdir(parents=True, exist_ok=True)
+        target = cache/'face_recognition_sface_2021dec.onnx'
+        if not str(target).isascii():
+            raise RuntimeError('当前OpenCV需要英文模型路径，请升级OpenCV后重试')
+        source = root/'models/face_recognition_sface_2021dec.onnx'
+        if not target.exists() or target.read_bytes() != source.read_bytes():
+            shutil.copyfile(source, target)
+        recognizer = cv2.FaceRecognizerSF.create(str(target), '')
     return detector, recognizer
 
 
@@ -35,7 +48,10 @@ def extract(frame, face, recognizer):
     if cv2.Laplacian(gray, cv2.CV_64F).var() < 60 or not 40 <= gray.mean() <= 220:
         return None
     feature = recognizer.feature(crop).reshape(-1)
-    return feature / max(float(np.linalg.norm(feature)), 1e-9)
+    norm = float(np.linalg.norm(feature))
+    if not np.isfinite(feature).all() or not np.isfinite(norm) or norm<1e-9:
+        return None
+    return feature / norm
 
 
 def main():

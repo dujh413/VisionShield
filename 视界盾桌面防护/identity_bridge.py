@@ -62,4 +62,3 @@ class IdentityBridge:
 
     def close(self):
         self.socket.close()
-
