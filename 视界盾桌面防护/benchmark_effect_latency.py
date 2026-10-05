@@ -92,6 +92,10 @@ def await_effect(app, overlay, rectangles, image, full, started, timeout=20):
                 return {'first_protection_ms':first_protected,
                         'final_effect_ms':(time.perf_counter()-started)*1000,
                         'worker_ms':overlay.blur_ms or 0.,
+                        'gpu_kernel_ms':overlay.blur_gpu_ms,
+                        'blur_backend':overlay.blur_backend,
+                        'blur_device':overlay.blur_device,
+                        'blur_fallback':overlay.blur_fallback,
                         'paint_ms':overlay.last_paint_ms,
                         'max_ui_callback_ms':max(callback)}
             if overlay.last_render_error:
@@ -105,6 +109,7 @@ def await_effect(app, overlay, rectangles, image, full, started, timeout=20):
 def mask_only(app, mode, rectangles, full=False, samples=30, warmups=3):
     overlay=overlay_for(app,mode)
     values=[]
+    cold=None
     image,_=fixture(0)
     boxes=mask_crops(rectangles,image.shape,8) if not full else ((0,0,WIDTH,HEIGHT),)
     try:
@@ -117,13 +122,20 @@ def mask_only(app, mode, rectangles, full=False, samples=30, warmups=3):
                 current[y+h//2,x+w//2]=(i+1)%255
             started=time.perf_counter()
             row=await_effect(app,overlay,rectangles,current,full,started)
+            if i == 0:cold=row
             if i>=warmups:values.append(row)
         validate_painted_masks(overlay,boxes)
         return {'effect':parse_effect(mode).__dict__,'warmups':warmups,
                 'painted_fixture_correct':True,
                 'physical_crops':len(boxes),
                 'pixel_area_ratio':round(sum(w*h for x,y,w,h in boxes)/(WIDTH*HEIGHT),6),
-                **{key:stats([row[key] for row in values]) for key in values[0]}}
+                'cold_first_trial':cold,
+                'blur_backends':sorted({row['blur_backend'] for row in values}),
+                'blur_devices':sorted({row['blur_device'] for row in values if row['blur_device']}),
+                'blur_fallbacks':sorted({row['blur_fallback'] for row in values if row['blur_fallback']}),
+                **{key:stats([row[key] for row in values]) for key in (
+                    'first_protection_ms','final_effect_ms','worker_ms','gpu_kernel_ms',
+                    'paint_ms','max_ui_callback_ms')}}
     finally:
         overlay.close()
 
@@ -189,6 +201,10 @@ def pipeline(app, mode, samples=30, warmups=3):
                              'queue_wait_ms':accepted.get('queue_wait_ms',0.),
                              'observe_ms':observe_ms,'accept_ms':index_ms,
                              'blur_worker_ms':overlay.blur_ms or 0.,
+                             'gpu_kernel_ms':overlay.blur_gpu_ms,
+                             'blur_backend':overlay.blur_backend,
+                             'blur_device':overlay.blur_device,
+                             'blur_fallback':overlay.blur_fallback,
                              'paint_ms':overlay.last_paint_ms,
                              'ocr_area_ratio':accepted['area_ratio'],'mode':accepted['mode'],
                              'sensitive_lines':len(view['hits'])}
@@ -204,12 +220,15 @@ def pipeline(app, mode, samples=30, warmups=3):
                                   'total':samples+warmups},ensure_ascii=True),flush=True)
         validate_painted_masks(overlay,mask_crops(sensitive_rectangles,image.shape,8))
         numeric=('capture_to_final_qt_ms','first_protection_ms','ocr_processing_ms',
-                 'queue_wait_ms','observe_ms','accept_ms','blur_worker_ms','paint_ms')
+                 'queue_wait_ms','observe_ms','accept_ms','blur_worker_ms','gpu_kernel_ms','paint_ms')
         return ({'effect':parse_effect(mode).__dict__,'warmups':warmups,
                  'providers':ready['providers'],'model_ready_ms':round(init_ms,3),
                  'first_full_frame_ms':round(baseline_ms,3),
                  'fixture_correct':True,'ocr_modes':sorted({r['mode'] for r in rows}),
                  'sensitive_line_counts':sorted({r['sensitive_lines'] for r in rows}),
+                 'blur_backends':sorted({r['blur_backend'] for r in rows}),
+                 'blur_devices':sorted({r['blur_device'] for r in rows if r['blur_device']}),
+                 'blur_fallbacks':sorted({r['blur_fallback'] for r in rows if r['blur_fallback']}),
                  'ocr_area_ratio_median':round(statistics.median(r['ocr_area_ratio'] for r in rows),6),
                  **{key:stats([row[key] for row in rows]) for key in numeric}},
                 sensitive_rectangles)

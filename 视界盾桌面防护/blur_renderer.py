@@ -83,6 +83,79 @@ def box_obscure_bgr(roi, radius):
     return np.ascontiguousarray(box_blur(roi, radius)[:, :, ::-1])
 
 
+class BoxBlurEngine:
+    """Lazy, owned GPU session with the original CPU algorithm as fallback.
+
+    A session is created only for a supported, nonzero numeric radius. Metadata
+    describes completed work, never just the presence of a GPU or a driver.
+    """
+    GPU_RADIUS_LIMIT = 128
+
+    def __init__(self, gpu_factory=None):
+        self._gpu_factory = gpu_factory
+        self._gpu = None
+        self._disabled = None
+        self._close_error = None
+        self.backend, self.device = 'none', ''
+        self.gpu_ms, self.fallback = 0.0, None
+
+    def render_bgr(self, image, radius):
+        if type(radius) is not int or radius < 0:
+            raise ValueError('invalid box radius')
+        if image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
+            raise ValueError('mask image must be uint8 BGR')
+        self.backend, self.device = 'cpu', ''
+        self.gpu_ms, self.fallback = 0.0, None
+        if radius == 0 or not image.size:
+            self.backend = 'copy'
+            return np.ascontiguousarray(image[:, :, ::-1]).copy()
+        if radius > self.GPU_RADIUS_LIMIT:
+            self.fallback = 'radius-out-of-range'
+        else:
+            if self._gpu is None and self._disabled is None:
+                try:
+                    if self._gpu_factory is None:
+                        from gpu_blur import OpenClBoxBlur
+                        self._gpu = OpenClBoxBlur()
+                    else:
+                        self._gpu = self._gpu_factory()
+                except Exception as error:
+                    self._disabled = 'init-' + type(error).__name__
+            if self._gpu is not None and self._disabled is None:
+                try:
+                    rgb = self._gpu.blur_bgr(image, radius)
+                    if rgb.shape != image.shape or rgb.dtype != np.uint8:
+                        raise ValueError('invalid GPU render')
+                    gpu_ms = float(self._gpu.last_gpu_ms)
+                    if not math.isfinite(gpu_ms) or gpu_ms < 0:
+                        raise ValueError('invalid GPU timing')
+                    self.backend, self.device = 'opencl-gpu', self._gpu.device
+                    self.gpu_ms = gpu_ms
+                    return np.ascontiguousarray(rgb)
+                except Exception as error:
+                    self._disabled = 'render-' + type(error).__name__
+                    self._release_gpu()
+            self.fallback = self._disabled
+        return box_obscure_bgr(image, radius)
+
+    def _release_gpu(self):
+        gpu = self._gpu
+        if gpu is not None:
+            try:
+                gpu.close()
+            except Exception as error:
+                self._close_error = type(error).__name__
+                self._disabled = self._disabled or 'release-' + self._close_error
+            else:
+                self._gpu = None
+                self._close_error = None
+
+    def close(self):
+        self._release_gpu()
+        if self._close_error is not None:
+            raise RuntimeError('GPU release failed: ' + self._close_error)
+
+
 @dataclass(frozen=True)
 class BlurRequest:
     sequence: int
@@ -99,12 +172,18 @@ class BlurResult:
     elapsed_ms: float = 0.0
     error: str | None = None
     radius: int | None = None
+    backend: str = 'none'
+    device: str = ''
+    gpu_ms: float = 0.0
+    fallback: str | None = None
 
 
 class BlurWorker:
     """One active request, one replacement pending request and one result."""
-    def __init__(self, render=None):
+    def __init__(self, render=None, engine_factory=BoxBlurEngine):
         self._render = render
+        self._engine_factory = engine_factory
+        self._close_error = None
         self._condition = threading.Condition()
         self._pending = None
         self._completed = None
@@ -149,8 +228,30 @@ class BlurWorker:
         self._thread.join(timeout)
         if self._thread.is_alive():
             raise TimeoutError('mask worker did not stop')
+        if self._close_error is not None:
+            raise RuntimeError('mask GPU release failed: ' + self._close_error)
 
     def _run(self):
+        try:
+            self._run_requests()
+        finally:
+            # _run_requests sets the session only on the owned worker thread.
+            engine = getattr(self, '_engine', None)
+            if engine is not None:
+                # A driver may report a transient release error. Both attempts
+                # stay on the owner thread; persistent failure blocks restart.
+                for attempt in range(2):
+                    try:
+                        engine.close()
+                    except Exception as error:
+                        self._close_error = type(error).__name__
+                    else:
+                        self._engine = None
+                        self._close_error = None
+                        break
+
+    def _run_requests(self):
+        self._engine = None
         while True:
             with self._condition:
                 while self._pending is None and not self._stopped:
@@ -162,6 +263,7 @@ class BlurWorker:
             start = time.perf_counter()
             try:
                 crops, abandoned = [], False
+                backends, devices, fallbacks, gpu_ms = set(), set(), set(), 0.0
                 for box, source in request.crops:
                     with self._condition:
                         abandoned = self._stopped or generation != self._generation
@@ -169,14 +271,27 @@ class BlurWorker:
                         break
                     if self._render is not None:
                         rendered = self._render(source)
+                        backends.add('custom')
                     elif request.radius is not None:
-                        rendered = box_obscure_bgr(source, request.radius)
+                        if self._engine is None:
+                            self._engine = self._engine_factory()
+                        rendered = self._engine.render_bgr(source, request.radius)
+                        backends.add(self._engine.backend)
+                        if self._engine.device:
+                            devices.add(self._engine.device)
+                        if self._engine.fallback:
+                            fallbacks.add(self._engine.fallback)
+                        gpu_ms += self._engine.gpu_ms
                     else:
                         rendered = obscure_bgr(source)
+                        backends.add('cpu-legacy')
                     crops.append((box, source, rendered))
                 result = None if abandoned else BlurResult(
                     request.sequence, request.geometry, tuple(crops),
-                    (time.perf_counter()-start)*1000, radius=request.radius)
+                    (time.perf_counter()-start)*1000, radius=request.radius,
+                    backend=next(iter(backends)) if len(backends) == 1 else 'mixed',
+                    device='; '.join(sorted(devices)), gpu_ms=gpu_ms,
+                    fallback='; '.join(sorted(fallbacks)) or None)
             except Exception as error:
                 # Never retain traceback/image data or put content into messages.
                 result = BlurResult(request.sequence, request.geometry, (),
@@ -211,6 +326,8 @@ class BlurCache:
         self._retry_at = 0.0
         self.last_error = None
         self.last_elapsed_ms = None
+        self.backend, self.device = 'none', ''
+        self.gpu_ms, self.fallback = 0.0, None
         self._image_shape = None
 
     @staticmethod
@@ -226,6 +343,8 @@ class BlurCache:
         self._retry_at = 0.0
         self.last_error = None
         self.last_elapsed_ms = None
+        self.backend, self.device = 'none', ''
+        self.gpu_ms, self.fallback = 0.0, None
         self._image_shape = None
 
     def close(self):
@@ -259,6 +378,8 @@ class BlurCache:
             if result.geometry == boxes and result.radius == self.radius:
                 self.last_elapsed_ms = result.elapsed_ms
                 self.last_error = result.error
+                self.backend, self.device = result.backend, result.device
+                self.gpu_ms, self.fallback = result.gpu_ms, result.fallback
                 if result.error is not None:
                     self._retry_at = self._clock()+1.0
                 else:

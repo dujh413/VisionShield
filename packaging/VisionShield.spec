@@ -19,7 +19,7 @@ data += collect_data_files('rapidocr_onnxruntime', excludes=['models/*'])
 data += collect_data_files('uiautomation')
 data += collect_data_files('comtypes', include_py_files=True)
 hidden = ['guard_service', 'app_shell', 'desktop_guard', 'camera_worker', 'owner_enrollment',
-          'fast_ocr', 'native_text', 'package_check', 'identity_test', 'camera_test',
+          'fast_ocr', 'gpu_blur', 'native_text', 'package_check', 'identity_test', 'camera_test',
           'owner_tracking', 'identity_state', 'identity_sender', 'owner_presence', 'app_scope', 'scope_picker',
           'region_tracker', 'region_features', 'region_anchor', 'region_worker']
 hidden += collect_submodules('rapidocr_onnxruntime')
@@ -32,7 +32,9 @@ a = Analysis([str(root/'VisionShield.py')], pathex=[str(root), str(desktop), str
                        'PySide6.QtWebEngineWidgets', 'PySide6.QtQml', 'PySide6.QtQuick'],
              noarchive=False)
 # Qt 6.11使用Windows原生ICU接口，不能被其他工具的同名ICU DLL覆盖。
-a.binaries = [entry for entry in a.binaries if Path(entry[0]).name.lower() not in ('icuuc.dll', 'icuin.dll', 'icu.dll')
+# OpenCL.dll and vendor drivers belong to Windows/the installed display driver.
+# Never redistribute an accidentally discovered host OpenCL loader with the app.
+a.binaries = [entry for entry in a.binaries if Path(entry[0]).name.lower() not in ('icuuc.dll', 'icuin.dll', 'icu.dll', 'opencl.dll')
               and not ('opencv_videoio_ffmpeg' in entry[0] and '4100' not in entry[0])]
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='VisionShield',
