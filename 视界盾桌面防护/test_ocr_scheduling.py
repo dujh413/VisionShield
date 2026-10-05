@@ -1,4 +1,5 @@
 import queue
+import time
 import unittest
 from unittest.mock import Mock
 import numpy as np
@@ -17,7 +18,7 @@ class SchedulingTests(unittest.TestCase):
         return worker
 
     def frame(self, number):
-        return Frame(number,0,{},np.zeros((10,10,3),dtype=np.uint8))
+        return Frame(number,time.monotonic(),{},np.zeros((10,10,3),dtype=np.uint8))
 
     def test_busy_worker_serializes_only_newest_pending_when_result_arrives(self):
         worker=self.worker()
@@ -59,6 +60,28 @@ class SchedulingTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):worker.close()
         self.assertTrue(worker.closed)
         self.assertIsNone(worker.pending)
+
+    def test_capture_stall_drops_expired_pending_before_serialization(self):
+        worker=self.worker();worker.submit(self.frame(1));worker.inputs.get_nowait()
+        frame=self.frame(2)
+        frame.captured_at-=2
+        worker.submit(frame)
+        worker.outputs.put({'lines':[],'frame_id':1})
+        worker.poll()
+        self.assertTrue(worker.inputs.empty())
+        self.assertEqual(worker.sent_frames,1)
+        self.assertIsNone(worker.pending)
+        self.assertTrue(worker.submit(self.frame(3)))
+        self.assertEqual(worker.inputs.get_nowait().frame_id,3)
+
+    def test_future_or_nonfinite_capture_is_not_dispatched(self):
+        worker=self.worker()
+        for timestamp in (time.monotonic()+10,float('nan'),float('inf')):
+            frame=self.frame(1);frame.captured_at=timestamp
+            worker.submit(frame)
+            self.assertTrue(worker.inputs.empty())
+            self.assertIsNone(worker.pending)
+        self.assertEqual(worker.sent_frames,0)
 
 
 if __name__=='__main__':unittest.main()

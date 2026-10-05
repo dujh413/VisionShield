@@ -40,6 +40,9 @@ class SensitiveTests(unittest.TestCase):
         for confidence in (float('nan'),float('inf'),-1,2):
             self.assertEqual(categories([line('模糊文字',confidence=confidence)]),{'无法确定'})
 
+    def test_empty_recognition_is_unknown_even_with_high_confidence(self):
+        self.assertEqual(categories([line('  ',confidence=.99)]),{'无法确定'})
+
     def test_valid_id_and_wrong_checksum(self):
         self.assertTrue(valid_id('11010519491231002X'))
         self.assertFalse(valid_id('110105194912310021'))

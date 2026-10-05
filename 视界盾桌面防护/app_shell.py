@@ -1,7 +1,6 @@
 """轻量界面不导入图像库；防护后端仅在启用时单独运行。"""
 import argparse
 import json
-import os
 from pathlib import Path
 import sys
 import uuid
@@ -10,7 +9,7 @@ from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox,
-                              QFrame, QHBoxLayout, QLabel, QMenu, QPushButton,
+                              QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
                               QSystemTrayIcon, QVBoxLayout, QWidget)
 
 
@@ -31,11 +30,13 @@ class Backend(QObject):
         self.buffer = b''
         self.stopping = False
         self.shield_enabled = True
+        self.effect_text = ""
         self.server = QLocalServer(self)
         self.server.newConnection.connect(self.accept_service)
         self.peer = None
         self.job = None
         self.failure_detail = None
+        self.app_profiles = {}
         self.watchdog = QTimer(self)
         self.watchdog.setSingleShot(True)
         self.watchdog.timeout.connect(self.timed_out)
@@ -55,9 +56,19 @@ class Backend(QObject):
 
     def accept_service(self):
         self.peer = self.server.nextPendingConnection()
+        if self.peer is None:
+            return
         self.peer.readyRead.connect(self.read_peer_status)
+        self.read_peer_status()  # readyRead绑定前已到达的首包也要处理。
+        self.send_preferences()
         if self.stopping:
-            self.peer.write(b'stop')
+            self.peer.write(b'stop\n')
+            self.peer.flush()
+
+    def send_preferences(self):
+        if self.peer is not None and not self.stopping:
+            packet = {'shield_enabled':self.shield_enabled, 'app_profiles':self.app_profiles, 'effect_text':self.effect_text}
+            self.peer.write((json.dumps(packet, ensure_ascii=True)+'\n').encode())
             self.peer.flush()
 
     def start(self):
@@ -88,6 +99,7 @@ class Backend(QObject):
         # 使QProcess和Job管理的是实际服务进程，而不是另一层python启动器。
         environment = QProcessEnvironment.systemEnvironment()
         environment.insert('VISION_SHIELD_SHIELD_ENABLED', '1' if self.shield_enabled else '0')
+        environment.insert('VISION_SHIELD_EFFECT_TEXT', self.effect_text)
         if not getattr(sys,'frozen',False) and sys.prefix != sys.base_prefix:
             base = Path(sys._base_executable).with_name('python.exe')
             environment.insert('__PYVENV_LAUNCHER__',executable)
@@ -101,7 +113,7 @@ class Backend(QObject):
         if self.process.state() == QProcess.NotRunning:
             self.stopped.emit()
         elif self.peer is not None:
-            self.peer.write(b'stop')
+            self.peer.write(b'stop\n')
             self.peer.flush()
         if self.process.state() != QProcess.NotRunning:
             self.watchdog.start(15000)
@@ -132,7 +144,7 @@ class Backend(QObject):
                 self.watchdog.stop()
                 self.updated.emit(value)
                 self.changed.emit(value['state'], value['detail'])
-                if value.get('alert'):
+                if isinstance(value.get('alert'), str) and value['alert']:
                     self.alerted.emit(value['alert'])
 
     def discard_errors(self):
@@ -199,6 +211,7 @@ class Shell(QWidget):
         self.settings = settings if settings is not None else QSettings('VisionShield', 'Desktop')
         self.backend = backend if backend is not None else Backend(self)
         self.preview, self.quitting, self.state = preview, False, 'paused'
+        self.session_profiles = {}
         self.setWindowTitle('视界盾')
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         self.setWindowIcon(shield_icon())
@@ -266,6 +279,21 @@ class Shell(QWidget):
         layout.addLayout(state_row)
         layout.addWidget(self.detail)
         layout.addStretch()
+        self.effect_checks = {}
+        for key, text in (('shield_enabled','遮蔽范围模糊化'),
+                          ('popup_enabled','检测陌生人后弹窗'),
+                          ('sound_enabled','检测陌生人后音效')):
+            check = QCheckBox(text)
+            check.setChecked(self.settings.value(key, True, type=bool))
+            check.toggled.connect(lambda value, name=key: self.change_effect(name, value))
+            self.effect_checks[key] = check
+            layout.addWidget(check)
+        self.effect_input = QLineEdit(str(self.settings.value('effect_text', '')))
+        self.effect_input.setMaxLength(128)
+        self.effect_input.setAccessibleName('敏感内容处理设置')
+        self.effect_input.setPlaceholderText('整数：模糊半径；留空：不处理；其他字符：深色遮挡')
+        layout.addWidget(QLabel('敏感内容处理设置（启用时生效）'))
+        layout.addWidget(self.effect_input)
         layout.addWidget(self.toggle)
         layout.addWidget(separator())
         layout.addLayout(actions)
@@ -289,13 +317,37 @@ class Shell(QWidget):
             self.backend.alerted.connect(self.remind_owner)
         self.set_state('paused')
 
+    def change_effect(self, key, value):
+        self.settings.setValue(key, bool(value))
+        self.settings.sync()
+        if key == 'popup_enabled' and not value and hasattr(self, 'reminder'):
+            self.reminder.hide()
+            self.reminder_timer.stop()
+        if key == 'shield_enabled':
+            self.backend.shield_enabled = bool(value)
+            if hasattr(self.backend, 'send_preferences'):
+                self.backend.send_preferences()
+        if self.state == 'running':
+            self.set_state(self.state, self.detail.text())
+
+    def load_profiles(self):
+        from app_scope import valid_profiles
+        try:
+            profiles=valid_profiles(json.loads(self.settings.value('app_profiles', '{}')))
+            profiles.update(self.session_profiles)
+            return profiles
+        except (TypeError, ValueError):
+            return {}
+
     def set_state(self, state, detail=None):
         self.state = state
         labels = {'paused': ('防护未启用', '启用防护'), 'starting': ('正在启动', '启动中…'),
                   'running': ('防护已启用', '暂停防护'), 'stopping': ('正在停止', '停止中…'),
                   'error': ('防护异常', '停止并重试')}
         title, action = labels[state]
-        if state == 'running' and not getattr(self.backend, 'shield_enabled', True):
+        committed = getattr(self.backend, 'effect_text', None)
+        mode_off = isinstance(committed, str) and not committed.strip()
+        if state == 'running' and (not getattr(self.backend, 'shield_enabled', True) or mode_off):
             title = '检测与提示已启用（不遮蔽）'
         self.status.setText(title)
         dot_color = {'running': '#345f86', 'error': '#a04a40', 'starting': '#a8843e',
@@ -320,6 +372,10 @@ class Shell(QWidget):
                 self.detail.setText('无法将控制窗口排除出屏幕采集，请检查Windows支持情况。')
                 return
             self.backend.shield_enabled = self.settings.value('shield_enabled', True, type=bool)
+            self.backend.app_profiles = self.load_profiles()
+            self.backend.effect_text = self.effect_input.text()
+            self.settings.setValue('effect_text', self.backend.effect_text)
+            self.settings.sync()
             self.set_state('starting', '正在加载本地防护服务。')
             self.backend.start()
         elif self.state in ('running', 'error'):
@@ -390,9 +446,9 @@ class Shell(QWidget):
         layout.addWidget(caption)
         effects = {}
         for index, (key, title, description) in enumerate((
-                ('shield_enabled', '遮蔽敏感内容', '旁观风险出现时，遮蔽敏感行与待分析区域。'),
-                ('sound_enabled', '音效提示', '检测到旁观风险时播放系统提示音。'),
-                ('popup_enabled', '弹窗提示', '检测到旁观风险时显示隐私提醒。'))):
+                ('shield_enabled', '遮蔽范围模糊化', '风险出现时按应用策略保护，可运行中修改。'),
+                ('sound_enabled', '音效提示', '检测到陌生人或旁人时播放系统提示音。'),
+                ('popup_enabled', '弹窗提示', '检测到陌生人或旁人时显示隐私提醒。'))):
             row = QHBoxLayout()
             row.setSpacing(16)
             text = QVBoxLayout()
@@ -416,10 +472,19 @@ class Shell(QWidget):
             layout.addLayout(row)
             if index < 2:
                 layout.addWidget(separator())
-        note = QLabel('遮蔽设置在下次启用防护时生效；提示设置保存后立即生效。\n关闭遮蔽后仍检测风险，但屏幕内容保持可见。')
+        note = QLabel('三个防护效果保存后立即生效，也可在主界面直接选择。\n关闭遮蔽后仍检测风险，但屏幕内容保持可见。')
         note.setObjectName('caption')
         note.setWordWrap(True)
         layout.addWidget(note)
+        scope_chat = QPushButton('框选并追踪应用区域…')
+        scope_window = QPushButton('指定应用整窗保护…')
+        reset_scope = QPushButton('清除应用校准')
+        scope_chat.clicked.connect(lambda: (dialog.reject(), self.calibrate_scope(False)))
+        scope_window.clicked.connect(lambda: (dialog.reject(), self.calibrate_scope(True)))
+        reset_scope.clicked.connect(lambda: self.save_profiles({}))
+        layout.addWidget(scope_chat)
+        layout.addWidget(scope_window)
+        layout.addWidget(reset_scope)
         layout.addWidget(separator())
         startup_heading = QLabel('启动偏好')
         startup_heading.setObjectName('section')
@@ -458,7 +523,8 @@ class Shell(QWidget):
         layout.addLayout(footer)
         if dialog.exec() == QDialog.Accepted:
             for key, checkbox in effects.items():
-                self.settings.setValue(key, checkbox.isChecked())
+                self.effect_checks[key].setChecked(checkbox.isChecked())
+                self.change_effect(key, checkbox.isChecked())
             if not effects['popup_enabled'].isChecked() and hasattr(self, 'reminder'):
                 self.reminder.hide()
                 self.reminder_timer.stop()
@@ -466,6 +532,46 @@ class Shell(QWidget):
             self.settings.setValue('start_hidden', hidden.isChecked())
             self.settings.sync()
         dialog.deleteLater()
+
+    def save_profiles(self, profiles):
+        from app_scope import stored_profiles,valid_profiles
+        profiles=valid_profiles(profiles)
+        self.session_profiles=profiles
+        self.settings.setValue('app_profiles', json.dumps(stored_profiles(profiles), ensure_ascii=True))
+        self.settings.sync()
+        self.backend.app_profiles = profiles
+        if hasattr(self.backend, 'send_preferences'):
+            self.backend.send_preferences()
+
+    def calibrate_scope(self, whole=False):
+        if self.preview or self.state != 'paused':
+            self.detail.setText('请先暂停防护，再打开目标应用并校准区域。')
+            return
+        from scope_picker import ScopePicker
+        self.hide()
+        try:
+            picker = ScopePicker(whole)
+            if picker.exec() == QDialog.Accepted and picker.result_profile:
+                profiles = self.load_profiles()
+                key, profile = picker.result_profile
+                picker.hide()
+                if key not in profiles and len(profiles) >= 20:
+                    self.detail.setText('已保存20个应用区域，请先清除旧区域后重试。')
+                    return
+                if not whole:
+                    from region_worker import enroll_region
+                    result=enroll_region(profile,self)
+                    if 'profile' not in result:
+                        self.detail.setText(result.get('error','已取消区域追踪'));return
+                    profile=result['profile']
+                profiles[key] = profile
+                self.save_profiles(profiles)
+                self.detail.setText('区域已绑定应用控件/视觉特征；拖动时跟随，失配时临时扩大保护。')
+            picker.deleteLater()
+        except Exception:
+            self.detail.setText('区域校准失败，请重新选择；当前保护策略继续保留。')
+        finally:
+            self.show_panel()
 
     def register_owner(self):
         if self.preview:
@@ -478,11 +584,16 @@ class Shell(QWidget):
             self.detail.setText('机主登记无法启动，请检查运行环境后重试。')
 
     def quit_app(self):
+        if self.quitting:
+            return
         self.quitting = True
         self.set_state('stopping', '正在释放防护资源。')
         self.backend.stop()
 
     def closeEvent(self, event):
+        if self.quitting:
+            event.accept()
+            return
         event.ignore()
         if self.has_tray:
             self.hide()
@@ -493,9 +604,10 @@ class Shell(QWidget):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--preview', action='store_true', help='仅预览界面，不加载防护后端')
-    parser.add_argument('--diagnostics', action='store_true', help='仅记录运行耗时元数据')
+    parser.add_argument('--diagnostics', action='store_true', help='记录匿名阶段耗时与心跳')
     args = parser.parse_args()
     if args.diagnostics:
+        import os
         os.environ['VISION_SHIELD_DIAGNOSTICS'] = '1'
     app = QApplication(sys.argv[:1])
     app.setQuitOnLastWindowClosed(False)

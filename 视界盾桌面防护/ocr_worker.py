@@ -162,7 +162,11 @@ class OCRWorker:
     def _dispatch(self):
         if self.closed or self.failed or self.busy or self.pending is None:
             return
-        frame = replace(self.pending, submitted_at=time.monotonic())
+        now = time.monotonic()
+        if not 0 <= now-self.pending.captured_at <= 1.5:
+            self.pending = None
+            return
+        frame = replace(self.pending, submitted_at=now)
         if put_latest(self.inputs, frame):
             self.pending = None
             self.busy = True

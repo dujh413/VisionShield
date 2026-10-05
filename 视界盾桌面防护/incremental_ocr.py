@@ -19,6 +19,9 @@ def uncertain_regions(lines, shape):
     uncertain = []
     for line in lines:
         rectangle = bounds(line)
+        if (not 0 <= rectangle[0] < rectangle[2] <= shape[1]
+                or not 0 <= rectangle[1] < rectangle[3] <= shape[0]):
+            raise ValueError('OCR polygon outside image')
         clipped = padded(rectangle, shape, 0)
         if clipped[0] >= clipped[2] or clipped[1] >= clipped[3]:
             raise ValueError('OCR polygon outside image')
@@ -43,20 +46,20 @@ class IncrementalOCR:
         self.partial_updates = 0
         self.max_area, self.max_partial = max_area, max_partial
         self.max_regions, self.full_refresh_s = max_regions, full_refresh_s
-        self.clock = clock or time.monotonic
+        self.clock = clock
         self.last_full_at = None
 
     def run(self, image, recognize):
         """recognize(image,preserve_scale)返回文字框；调用方不得修改帧数组。"""
         if image.ndim != 3 or image.shape[2] != 3 or not image.shape[0] or not image.shape[1]:
             raise ValueError('expected a nonempty three-channel image')
-        started = self.clock()
+        started = (self.clock or time.monotonic)()
         mode, ratio, regions_count = 'full', 1.0, 1
         compatible = self.image is not None and self.image.shape == image.shape
         refresh_due = (self.last_full_at is None or
                        started - self.last_full_at >= self.full_refresh_s)
         boxes = changed_regions(self.image, image, self.lines) if compatible and not refresh_due else []
-        diff_ms = (self.clock() - started) * 1000
+        diff_ms = ((self.clock or time.monotonic)() - started) * 1000
         if compatible and not refresh_due:
             if not boxes:
                 self.image = image
@@ -105,7 +108,7 @@ class IncrementalOCR:
         self.partial_updates = partial_updates
         self.unknown_regions = merge_boxes(unknown)
         if mode == 'full':
-            self.last_full_at = self.clock()
+            self.last_full_at = (self.clock or time.monotonic)()
         return lines, {'mode': mode, 'area_ratio': ratio,
                        'regions_count': regions_count, 'diff_ms': diff_ms,
                        'unknown_regions': list(self.unknown_regions)}

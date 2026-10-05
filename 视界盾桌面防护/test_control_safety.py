@@ -4,6 +4,10 @@ import time
 import subprocess
 import sys
 import unittest
+import tempfile
+import csv
+import json
+from pathlib import Path
 from unittest.mock import Mock, patch
 import numpy as np
 from PySide6.QtWidgets import QApplication
@@ -18,12 +22,12 @@ class ControlSafetyTests(unittest.TestCase):
         cls.app=QApplication.instance() or QApplication([])
 
     def setUp(self):
-        self.panel=ControlPanel(integrated=True)
+        self.panel=ControlPanel(integrated=True, effect_text='遮挡')
         self.now=time.monotonic()
         p=self.panel
         p.started=self.now-40
         p.state=ProtectionState(restore_delay=0)
-        p.camera=Mock(last={'owner_verified':True},error=None)
+        p.camera=Mock(last={'owner_verified':True,'stranger_detected':False},error=None)
         p.camera.risk.return_value=(False,'机主独处且已确认')
         p.capture=Mock()
         p.capture.latest.return_value=None
@@ -32,8 +36,10 @@ class ControlSafetyTests(unittest.TestCase):
         p.worker.process.is_alive.return_value=True
         p.overlay=Mock()
         p.latest=Frame(1,self.now,{},np.zeros((64,64,3),dtype=np.uint8))
-        p.content.update(p.latest.image)
-        p.content.accept(p.latest.image,[])
+        p.content.observe(p.latest)
+        self.lines=[{'text':'ordinary','confidence':.99,'polygon':[[10,10],[50,10],[50,25],[10,25]]}]
+        p.content.accept({'frame_id':1,'captured_at':self.now,'image':p.latest.image,
+                          'lines':self.lines,'unknown_regions':[]},self.now)
         p.last_ocr_finished=self.now
         p.ready=True
         p.writer=Mock();p.log=Mock()
@@ -64,8 +70,15 @@ class ControlSafetyTests(unittest.TestCase):
         self.tick()
         self.assertTrue(self.panel.protecting)
 
+    def test_owner_pose_or_missing_face_does_not_emit_stranger_alert(self):
+        self.panel.camera.risk.return_value=(True,'机主未确认')
+        self.tick()
+        self.assertTrue(self.panel.protecting)
+        self.assertIsNone(self.panel.alert_message)
+
     def test_detection_only_keeps_alert_without_shielding(self):
         self.panel.shield_enabled = False
+        self.panel.camera.last['stranger_detected'] = True
         self.panel.camera.risk.return_value = (True, '检测到旁人')
         self.tick()
         self.assertFalse(self.panel.protecting)
@@ -142,37 +155,112 @@ class ControlSafetyTests(unittest.TestCase):
         self.panel.last_ocr_finished=self.now-20
         self.tick()
         self.assertTrue(self.panel.protecting)
-        self.panel.worker.poll.return_value=[{'captured_at':self.now,'image':self.panel.latest.image,
-                                             'lines':[{'text':'普通文字','confidence':.99,
-                                                       'polygon':[[8,8],[48,8],[48,24],[8,24]]}],
-                                             'unknown_regions':[],'elapsed_ms':20}]
+        self.panel.latest.frame_id=2
+        self.panel.content.observe(self.panel.latest)
+        self.panel.worker.poll.return_value=[{'frame_id':2,'captured_at':self.now,'image':self.panel.latest.image,
+                                             'lines':self.lines,'unknown_regions':[],'elapsed_ms':20}]
         self.tick()
         self.assertFalse(self.panel.protecting)
         self.assertIsNone(self.panel.error)
 
-    def test_empty_unknown_ocr_cannot_restore_stale_protection(self):
-        self.panel.last_ocr_finished=self.now-20
-        self.panel.worker.poll.return_value=[{'captured_at':self.now,'image':self.panel.latest.image,
-                                             'lines':[],'unknown_regions':[(0,0,64,64)],'elapsed_ms':20}]
+    def test_empty_result_keeps_unknown_protected(self):
+        self.panel.latest.frame_id=2
+        self.panel.content.observe(self.panel.latest)
+        self.panel.worker.poll.return_value=[{'frame_id':2,'captured_at':self.now,
+            'image':self.panel.latest.image,'lines':[],'elapsed_ms':20}]
         self.tick()
         self.assertTrue(self.panel.protecting)
-        self.assertEqual(self.panel.last_ocr_finished,self.now-20)
+        self.assertTrue(self.panel.overlay.set_masks.call_args.kwargs['full'])
 
-    def test_stable_captures_are_observed_but_not_repeatedly_submitted(self):
-        screen=Mock()
-        screen.geometry.return_value.width.return_value=64
-        screen.geometry.return_value.height.return_value=64
-        screen.devicePixelRatio.return_value=1
-        first=Frame(2,self.now,{},np.zeros((64,64,3),dtype=np.uint8))
-        self.panel.capture.latest.return_value=first
-        with patch('desktop_guard.QApplication.primaryScreen',return_value=screen):self.tick()
-        self.panel.worker.submit.assert_called_once()
-        self.now+=.2
-        second=Frame(3,self.now,{},first.image.copy())
-        self.panel.capture.latest.return_value=second
-        with patch('desktop_guard.QApplication.primaryScreen',return_value=screen):self.tick()
-        self.panel.worker.submit.assert_called_once()
-        self.assertEqual(self.panel.latest.frame_id,3)
+    def test_empty_mode_suppresses_exception_masks_without_stopping_detection(self):
+        self.panel.apply_preferences({'effect_text':''})
+        self.panel.camera.poll.side_effect=RuntimeError('synthetic failure')
+        with patch('traceback.print_exc'):
+            self.tick()
+        self.assertFalse(self.panel.protecting)
+        self.assertFalse(self.panel.overlay.set_masks.call_args.kwargs['full'])
+
+    def test_latest_pending_frame_replaces_old_request_before_poll_dispatch(self):
+        calls=[]
+        self.panel.worker.submit.side_effect=lambda frame: calls.append(('submit',frame.frame_id)) or True
+        self.panel.worker.poll.side_effect=lambda: calls.append(('poll',None)) or []
+        self.tick()
+        self.assertEqual(calls,[('submit',1),('poll',None)])
+        calls.clear()
+        self.now+=.11
+        self.panel.latest=Frame(2,self.now,{},self.panel.latest.image.copy())
+        self.panel.latest.image[3,3,0]=1
+        self.panel.content.observe(self.panel.latest)
+        self.tick()
+        self.assertEqual(calls,[('submit',2),('poll',None)])
+
+    def test_stable_screen_refreshes_without_duplicate_submission_each_tick(self):
+        self.tick()
+        self.assertEqual(self.panel.worker.submit.call_count,1)
+        for _ in range(5):
+            self.now+=.11
+            self.panel.latest.captured_at=self.now
+            self.tick()
+        self.assertEqual(self.panel.worker.submit.call_count,1)
+        self.now+=3
+        self.panel.latest.captured_at=self.now
+        self.tick()
+        self.assertEqual(self.panel.worker.submit.call_count,2)
+
+    def test_failed_submission_does_not_mark_frame_as_scheduled(self):
+        self.panel.worker.submit.return_value=False
+        self.tick()
+        self.assertIsNone(self.panel.scheduler.image)
+        self.panel.worker.submit.return_value=True
+        self.tick()
+        self.assertIs(self.panel.scheduler.image,self.panel.latest.image)
+
+    def test_pause_discards_scheduler_state(self):
+        self.tick()
+        self.assertIsNotNone(self.panel.scheduler.image)
+        self.panel.pause()
+        self.assertIsNone(self.panel.scheduler.image)
+
+    def test_enabled_performance_log_records_production_coverage_and_timings(self):
+        from performance_log import PerformanceLog
+        with tempfile.TemporaryDirectory() as directory:
+            self.panel.diagnostics=PerformanceLog(directory)
+            self.panel.worker.sent_frames=1
+            self.panel.overlay.blur_ms=2
+            self.panel.overlay.last_paint_ms=3
+            self.panel.worker.poll.return_value=[{'ready':True,'providers':{'det':['CPUExecutionProvider']}}]
+            self.tick()
+            self.assertIsNone(self.panel.error)
+            self.panel.diagnostics.close();self.panel.diagnostics=None
+            with (Path(directory)/'heartbeat.csv').open(encoding='utf-8-sig') as stream:
+                rows=list(csv.DictReader(stream))
+            self.assertEqual(rows[0]['unknown_regions'],'0')
+            self.assertEqual(rows[0]['blur_ms'],'2')
+            self.assertEqual(rows[0]['paint_ms'],'3')
+            events=[json.loads(line) for line in (Path(directory)/'events.jsonl').read_text(encoding='utf-8').splitlines()]
+            self.assertEqual(events[0]['event'],'ocr_ready')
+
+    def test_empty_mode_stranger_alert_matches_detection_only_behavior(self):
+        self.panel.apply_preferences({'effect_text':''})
+        self.panel.camera.last['stranger_detected']=True
+        self.panel.camera.risk.return_value=(True,'检测到旁人')
+        self.tick()
+        self.assertFalse(self.panel.protecting)
+        self.assertIn('遮蔽已关闭',self.panel.alert_message)
+
+    def test_diagnostic_close_failure_resets_state_and_blocks_restart(self):
+        self.panel.diagnostics=Mock()
+        self.panel.diagnostics.close.side_effect=OSError('synthetic failure')
+        self.tick()
+        self.assertFalse(self.panel.pause())
+        self.assertIsNone(self.panel.latest)
+        self.assertIsNone(self.panel.scheduler.image)
+        self.assertFalse(self.panel.ready)
+        self.assertIn('diagnostics:OSError',self.panel.error)
+        with patch('desktop_guard.ScreenCapture') as create_capture:
+            self.panel.start()
+            create_capture.assert_not_called()
+        self.panel.diagnostics=None
 
 
 if __name__=='__main__':unittest.main()

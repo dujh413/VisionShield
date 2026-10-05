@@ -13,6 +13,8 @@ import numpy as np
 
 def mask_crops(rectangles, image_shape, padding=8):
     """Clip padded physical-pixel rectangles and merge overlapping crops."""
+    if type(padding) is not int or padding < 0:
+        raise ValueError('invalid mask padding')
     height, width = int(image_shape[0]), int(image_shape[1])
     if height <= 0 or width <= 0:
         raise ValueError('invalid image bounds')
@@ -30,6 +32,11 @@ def mask_crops(rectangles, image_shape, padding=8):
         y2 = min(height, math.ceil(y+h)+padding)
         if x2 > x1 and y2 > y1:
             boxes.append((x1, y1, x2, y2))
+    if padding == 0:
+        # Scoped masks can surround an excluded foreground window. Bounding-box
+        # merging of an L-shaped union would fill its transparent hole.
+        return tuple(sorted((x1, y1, x2-x1, y2-y1)
+                            for x1, y1, x2, y2 in set(boxes)))
     # Repeat after a merge: its bounding box may intersect a previously separate
     # crop. Each physical pixel then has one deterministic rendering strength.
     merged = []
@@ -70,11 +77,18 @@ def obscure_bgr(roi):
     return cv2.cvtColor(obscured, cv2.COLOR_BGR2RGB)
 
 
+def box_obscure_bgr(roi, radius):
+    """Exact user-selected box radius; no pixelation or implicit darkening."""
+    from mask_effect import box_blur
+    return np.ascontiguousarray(box_blur(roi, radius)[:, :, ::-1])
+
+
 @dataclass(frozen=True)
 class BlurRequest:
     sequence: int
     geometry: tuple
     crops: tuple  # (physical xywh, owned BGR source) pairs
+    radius: int | None = None
 
 
 @dataclass(frozen=True)
@@ -84,11 +98,12 @@ class BlurResult:
     crops: tuple  # (physical xywh, owned source, rendered RGB) triples
     elapsed_ms: float = 0.0
     error: str | None = None
+    radius: int | None = None
 
 
 class BlurWorker:
     """One active request, one replacement pending request and one result."""
-    def __init__(self, render=obscure_bgr):
+    def __init__(self, render=None):
         self._render = render
         self._condition = threading.Condition()
         self._pending = None
@@ -132,6 +147,8 @@ class BlurWorker:
             self._pending = self._completed = None
             self._condition.notify_all()
         self._thread.join(timeout)
+        if self._thread.is_alive():
+            raise TimeoutError('mask worker did not stop')
 
     def _run(self):
         while True:
@@ -150,14 +167,21 @@ class BlurWorker:
                         abandoned = self._stopped or generation != self._generation
                     if abandoned:
                         break
-                    crops.append((box, source, self._render(source)))
+                    if self._render is not None:
+                        rendered = self._render(source)
+                    elif request.radius is not None:
+                        rendered = box_obscure_bgr(source, request.radius)
+                    else:
+                        rendered = obscure_bgr(source)
+                    crops.append((box, source, rendered))
                 result = None if abandoned else BlurResult(
                     request.sequence, request.geometry, tuple(crops),
-                    (time.perf_counter()-start)*1000)
+                    (time.perf_counter()-start)*1000, radius=request.radius)
             except Exception as error:
                 # Never retain traceback/image data or put content into messages.
                 result = BlurResult(request.sequence, request.geometry, (),
-                                    (time.perf_counter()-start)*1000, type(error).__name__)
+                                    (time.perf_counter()-start)*1000, type(error).__name__,
+                                    request.radius)
             with self._condition:
                 if result is not None and not self._stopped and generation == self._generation:
                     self._completed = result
@@ -168,12 +192,17 @@ class BlurWorker:
             # Loop targets otherwise retain the final crop while waiting.
             if 'source' in locals():
                 del source
+            if 'rendered' in locals():
+                del rendered
 
 
 class BlurCache:
     """Qt-thread coordinator; returns validated RGB regions and dark fallbacks."""
-    def __init__(self, worker=None, clock=time.monotonic):
+    def __init__(self, worker=None, clock=time.monotonic, radius=None):
+        if radius is not None and (type(radius) is not int or radius < 0):
+            raise ValueError('invalid box radius')
         self.worker = worker or BlurWorker()
+        self.radius = radius
         self._clock = clock
         self._ready = {}
         self._submitted = None
@@ -182,6 +211,7 @@ class BlurCache:
         self._retry_at = 0.0
         self.last_error = None
         self.last_elapsed_ms = None
+        self._image_shape = None
 
     @staticmethod
     def _matches(image, box, source):
@@ -196,6 +226,7 @@ class BlurCache:
         self._retry_at = 0.0
         self.last_error = None
         self.last_elapsed_ms = None
+        self._image_shape = None
 
     def close(self):
         self._closed = True
@@ -211,11 +242,21 @@ class BlurCache:
         if image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
             self.clear()
             raise ValueError('mask image must be uint8 BGR')
+        height, width = image.shape[:2]
+        if any(len(box) != 4 or any(type(v) is not int for v in box)
+               or box[0] < 0 or box[1] < 0 or box[2] <= 0 or box[3] <= 0
+               or box[0]+box[2] > width or box[1]+box[3] > height
+               for box in boxes):
+            self.clear()
+            raise ValueError('invalid mask crop')
+        if self._image_shape is not None and self._image_shape != image.shape:
+            self.clear()
+        self._image_shape = image.shape
         result = self.worker.poll()
         if result is not None:
             if self._submitted is not None and result.sequence == self._submitted.sequence:
                 self._submitted = None
-            if result.geometry == boxes:
+            if result.geometry == boxes and result.radius == self.radius:
                 self.last_elapsed_ms = result.elapsed_ms
                 self.last_error = result.error
                 if result.error is not None:
@@ -253,7 +294,7 @@ class BlurCache:
                 source.flags.writeable = False
                 crops.append((box, source))
             self._sequence += 1
-            request = BlurRequest(self._sequence, boxes, tuple(crops))
+            request = BlurRequest(self._sequence, boxes, tuple(crops), self.radius)
             if self.worker.submit(request):
                 self._submitted = request
         return ready, pending
