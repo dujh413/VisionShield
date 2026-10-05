@@ -49,7 +49,7 @@ def main():
 
     def read_commands():
         nonlocal command_buffer, pending_preferences
-        command_buffer = (command_buffer+bytes(socket.readAll()))[-65536:]
+        command_buffer = (command_buffer+bytes(socket.readAll()))[-262144:]
         # 兼容旧版无换行stop；新版JSON逐行处理，支持拆包和多次修改。
         if command_buffer == b'stop':
             request_stop()

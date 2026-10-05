@@ -24,6 +24,8 @@ class ControlPanel(QWidget):
         self.shield_enabled = shield_enabled
         self.exclusion_verified = False
         self.app_profiles = {}
+        self.region_tracker = None
+        self.region_status = '未设置追踪区域'
         self.setWindowTitle('视界盾 · 主屏自动防护')
         from PySide6.QtCore import Qt
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
@@ -146,6 +148,9 @@ class ControlPanel(QWidget):
     def pause(self):
         self.timer.stop()
         failures = []
+        if self.region_tracker is not None:
+            try:self.region_tracker.close();self.region_tracker=None
+            except Exception:failures.append('region_tracker')
         for name in ('overlay', 'capture', 'worker', 'camera', 'bridge'):
             obj = getattr(self, name, None)
             if obj is not None:
@@ -227,11 +232,19 @@ class ControlPanel(QWidget):
             full = protecting and (self.latest is None or self.last_ocr_finished is None or bool(self.error) or stale or capture_stale)
             rectangles = ([rect_of(hit['polygon']) for hit in self.hits]+self.content.pending_rectangles()) if protecting else []
             scoped = False
-            if protecting and self.latest is not None and self.latest.monitor_rect:
+            if self.latest is not None and self.latest.monitor_rect:
                 from app_scope import application_masks, window_inventory
                 windows = window_inventory(self.latest.monitor_rect)
-                rectangles, full = application_masks(windows, rectangles, full, self.app_profiles)
-                scoped = bool(windows)
+                if self.region_tracker is None:
+                    from region_tracker import RegionTracker
+                    self.region_tracker = RegionTracker()
+                scopes=self.region_tracker.resolve(self.app_profiles,windows,self.latest.image,
+                    (self.latest.monitor_rect['left'],self.latest.monitor_rect['top']),now)
+                self.region_status = ('区域特征追踪中' if scopes and all(s['rect'] is not None for s in scopes.values()) else
+                                      '区域等待或失配，所属窗口保护' if any(p['mode']=='tracked' for p in self.app_profiles.values()) else '默认应用策略')
+                if protecting:
+                    rectangles, full = application_masks(windows, rectangles, full, self.app_profiles, resolved=scopes)
+                    scoped = bool(windows)
             self.overlay.set_masks(rectangles, full=full, image=self.latest.image if self.latest is not None else None, padding=0 if scoped else 8)
             state = '异常保护' if self.error else '临时全屏保护' if full else '应用区域保护' if protecting else '正常显示'
             if not self.shield_enabled:
@@ -239,6 +252,7 @@ class ControlPanel(QWidget):
             self.status.setText(f'{state} · {reason}\nOCR：'+('异常' if self.error else '已就绪' if self.ready else '加载中'))
             self.detail.setText(f'有效敏感行：{len(self.hits)}；范围：主显示器\n' +
                                 ('实验语义已启用（小样本，需独立评估）' if self.semantic else '规则模式；尚不能覆盖全部私人聊天语义'))
+            if protecting:self.status.setText(self.status.text()+'\n'+self.region_status)
             summary = (state, len(self.hits), tuple(sorted({c for h in self.hits for c in h['categories']})))
             if summary != self.last_log_state or ocr_ms is not None:
                 self.writer.writerow([round(now-self.started,3), state,

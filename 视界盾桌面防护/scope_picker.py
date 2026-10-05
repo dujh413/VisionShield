@@ -1,4 +1,4 @@
-"""一次性应用区域校准；不截图，不保存应用标题/内容。"""
+"""框选应用区域；随后建立控件/视觉锚点，截图不落盘。"""
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QApplication, QDialog
@@ -38,7 +38,8 @@ class ScopePicker(QDialog):
             client=window['client'];clipped=intersect(area,client)
             if clipped is None or clipped[2]<20 or clipped[3]<20:self.first=None;self.update();return
             cx,cy,cw,ch=client
-            profile={'mode':'chat','region':[(clipped[0]-cx)/cw,(clipped[1]-cy)/ch,clipped[2]/cw,clipped[3]/ch],'size':[cw,ch]}
+            profile={'command':'enroll','region':[(clipped[0]-cx)/cw,(clipped[1]-cy)/ch,clipped[2]/cw,clipped[3]/ch],
+                     'binding':{'handle':window['handle'],'pid':window['pid']}}
         self.result_profile=(window['key'],profile)
         self.accept()
 

@@ -209,6 +209,7 @@ class Shell(QWidget):
         self.settings = settings if settings is not None else QSettings('VisionShield', 'Desktop')
         self.backend = backend if backend is not None else Backend(self)
         self.preview, self.quitting, self.state = preview, False, 'paused'
+        self.session_profiles = {}
         self.setWindowTitle('视界盾')
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         self.setWindowIcon(shield_icon())
@@ -324,7 +325,9 @@ class Shell(QWidget):
     def load_profiles(self):
         from app_scope import valid_profiles
         try:
-            return valid_profiles(json.loads(self.settings.value('app_profiles', '{}')))
+            profiles=valid_profiles(json.loads(self.settings.value('app_profiles', '{}')))
+            profiles.update(self.session_profiles)
+            return profiles
         except (TypeError, ValueError):
             return {}
 
@@ -460,7 +463,7 @@ class Shell(QWidget):
         note.setObjectName('caption')
         note.setWordWrap(True)
         layout.addWidget(note)
-        scope_chat = QPushButton('校准聊天对话区域…')
+        scope_chat = QPushButton('框选并追踪应用区域…')
         scope_window = QPushButton('指定应用整窗保护…')
         reset_scope = QPushButton('清除应用校准')
         scope_chat.clicked.connect(lambda: (dialog.reject(), self.calibrate_scope(False)))
@@ -518,7 +521,10 @@ class Shell(QWidget):
         dialog.deleteLater()
 
     def save_profiles(self, profiles):
-        self.settings.setValue('app_profiles', json.dumps(profiles, ensure_ascii=True))
+        from app_scope import stored_profiles,valid_profiles
+        profiles=valid_profiles(profiles)
+        self.session_profiles=profiles
+        self.settings.setValue('app_profiles', json.dumps(stored_profiles(profiles), ensure_ascii=True))
         self.settings.sync()
         self.backend.app_profiles = profiles
         if hasattr(self.backend, 'send_preferences'):
@@ -535,10 +541,22 @@ class Shell(QWidget):
             if picker.exec() == QDialog.Accepted and picker.result_profile:
                 profiles = self.load_profiles()
                 key, profile = picker.result_profile
+                picker.hide()
+                if key not in profiles and len(profiles) >= 20:
+                    self.detail.setText('已保存20个应用区域，请先清除旧区域后重试。')
+                    return
+                if not whole:
+                    from region_worker import enroll_region
+                    result=enroll_region(profile,self)
+                    if 'profile' not in result:
+                        self.detail.setText(result.get('error','已取消区域追踪'));return
+                    profile=result['profile']
                 profiles[key] = profile
                 self.save_profiles(profiles)
-                self.detail.setText('应用区域已保存；移动窗口自动跟随，调整布局尺寸后请重新校准。')
+                self.detail.setText('区域已绑定应用控件/视觉特征；拖动时跟随，失配时临时扩大保护。')
             picker.deleteLater()
+        except Exception:
+            self.detail.setText('区域校准失败，请重新选择；当前保护策略继续保留。')
         finally:
             self.show_panel()
 

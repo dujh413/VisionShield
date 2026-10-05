@@ -17,6 +17,7 @@ $process.Refresh()
 if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $report)) { throw 'Package verification failed. No cleanup performed.' }
 $result = Get-Content -LiteralPath $report -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($result.passed -ne $true -or $result.frozen -ne $true -or
+    $result.region_tracking.passed -ne $true -or
     @($result.checks.PSObject.Properties).Count -ne 11 -or
     @($result.checks.PSObject.Properties | Where-Object { $_.Value -ne $true }).Count -ne 0 -or
     (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ne $hash) { throw 'Invalid or changed package verification result.' }

@@ -20,7 +20,8 @@ data += collect_data_files('uiautomation')
 data += collect_data_files('comtypes', include_py_files=True)
 hidden = ['guard_service', 'app_shell', 'desktop_guard', 'camera_worker', 'owner_enrollment',
           'fast_ocr', 'native_text', 'package_check', 'identity_test', 'camera_test',
-          'owner_tracking', 'identity_state', 'identity_sender', 'owner_presence', 'app_scope', 'scope_picker']
+          'owner_tracking', 'identity_state', 'identity_sender', 'owner_presence', 'app_scope', 'scope_picker',
+          'region_tracker', 'region_features', 'region_anchor', 'region_worker']
 hidden += collect_submodules('rapidocr_onnxruntime')
 hidden += collect_submodules('comtypes', filter=lambda name: not name.startswith('comtypes.test'))
 
