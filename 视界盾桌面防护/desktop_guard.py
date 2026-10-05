@@ -16,10 +16,12 @@ from overlay_window import OverlayWindow, exclude_capture
 from protection_state import ProtectionState
 from content_index import ContentIndex
 from runtime_paths import desktop_root, records_directory
+from frame_scheduler import FrameScheduler
+from performance_log import PerformanceLog
 
 
 class ControlPanel(QWidget):
-    def __init__(self, semantic=False, integrated=False, shield_enabled=True):
+    def __init__(self, semantic=False, integrated=False, shield_enabled=True, diagnostics=False):
         super().__init__()
         self.shield_enabled = shield_enabled
         self.setWindowTitle('视界盾 · 主屏自动防护')
@@ -59,6 +61,9 @@ class ControlPanel(QWidget):
             raise ValueError('实验语义分类模块尚未交付，请使用默认规则模式')
         self.log = self.writer = None
         self.last_log_state = None
+        self.scheduler = FrameScheduler()
+        self.diagnostics_enabled = diagnostics
+        self.performance_log = None
 
     def start(self):
         if not self.pause():
@@ -96,6 +101,7 @@ class ControlPanel(QWidget):
             self.hits, self.last_capture = [], 0
             self.error, self.ready = None, False
             self.content = ContentIndex()
+            self.scheduler = FrameScheduler()
             self.last_risk, self.alert_message, self.last_ocr_finished = False, None, None
             records = records_directory()
             records.mkdir(parents=True, exist_ok=True)
@@ -103,6 +109,7 @@ class ControlPanel(QWidget):
             self.writer = csv.writer(self.log)
             self.writer.writerow(['elapsed_s','state','frame_id','sensitive_lines','categories','ocr_ms'])
             self.started = time.monotonic()
+            self.performance_log = PerformanceLog(records/f'performance_{datetime.now():%Y%m%d_%H%M%S_%f}') if self.diagnostics_enabled else None
             self.last_log_state = None
             self.timer.start()
             self.status.setText('启动中：初始化本地OCR；'+('未确认安全前临时全屏保护。' if self.shield_enabled else '仅检测与提示，不遮蔽屏幕。'))
@@ -127,11 +134,18 @@ class ControlPanel(QWidget):
                 self.log = self.writer = None
             except Exception as error:
                 failures.append('log:'+type(error).__name__)
+        if self.performance_log:
+            try:
+                self.performance_log.close()
+                self.performance_log = None
+            except Exception as error:
+                failures.append('diagnostics:'+type(error).__name__)
         self.latest = self.valid_image = None
         self.hits = []
         self.content = ContentIndex()
         self.ready = False
         self.last_ocr_finished = None
+        self.scheduler = FrameScheduler()
         self.protecting = self.overlay is not None
         self.error = '资源清理未完成：'+', '.join(failures) if failures else None
         self.status.setText(self.error or '已暂停：当前桌面不受本软件保护。')
@@ -140,6 +154,7 @@ class ControlPanel(QWidget):
     def tick(self):
         try:
             now = time.monotonic()
+            tick_started = now
             sensor = self.camera if self.integrated else self.bridge
             sensor.poll()
             risk, reason = sensor.risk(now)
@@ -163,18 +178,34 @@ class ControlPanel(QWidget):
                         raise RuntimeError(self.error)
                     self.latest = frame
                     self.content.update(frame.image)
-                    # 未有有效OCR时持续提交最新帧；队列最大1。
-                    if self.ready and not self.error:
-                        self.worker.submit(frame)
+            # Stable frames are refreshed periodically; busy OCR keeps only a local
+            # latest pending frame, so repeated submissions do not serialize images.
+            if self.ready and not self.error and self.scheduler.due(self.latest, now):
+                if self.worker.submit(self.latest) is not False:
+                    self.scheduler.submitted(self.latest, now)
             for item in self.worker.poll():
+                received = time.monotonic()
                 if item.get('ready'):
                     self.ready = True
+                    if self.performance_log:
+                        self.performance_log.event(received,self.started,{'event':'ocr_ready',**item})
                 elif 'error' in item:
                     self.error = 'OCR异常：'+item['error']
-                elif self.latest is not None and now-item['captured_at'] <= 10:
-                    if self.content.accept(item['image'],item['lines'],self.semantic):
-                        self.last_ocr_finished = now
-                        ocr_ms = item['elapsed_ms']
+                elif 'lines' in item:
+                    index_started=time.monotonic()
+                    accepted = (self.latest is not None and 0 <= received-item['captured_at'] <= 10
+                                and self.content.accept(item['image'],item['lines'],self.semantic,
+                                                        unknown_regions=item.get('unknown_regions')))
+                    if accepted:
+                        self.last_ocr_finished = received
+                    ocr_ms = item['elapsed_ms']
+                    if self.performance_log:
+                        self.performance_log.event(received,self.started,{
+                            **item,'event':'ocr_result','accepted':accepted,'lines_count':len(item['lines']),
+                            'result_age_ms':(received-item['captured_at'])*1000,
+                            'receive_delay_ms':(received-item.get('ocr_finished_at',received))*1000,
+                            'index_ms':(time.monotonic()-index_started)*1000})
+            now = time.monotonic()
             self.hits = self.content.hits
             self.valid_image = self.content.image if self.last_ocr_finished is not None else None
             if not self.worker.process.is_alive():
@@ -206,6 +237,16 @@ class ControlPanel(QWidget):
                                       len(self.hits), '|'.join(summary[2]), ocr_ms])
                 self.log.flush()
                 self.last_log_state = summary
+            if self.performance_log:
+                self.performance_log.heartbeat(now,self.started,{
+                    'frame_id':self.latest.frame_id if self.latest else None,
+                    'frame_age_ms':(now-self.latest.captured_at)*1000 if self.latest else None,
+                    'ocr_ready':self.ready,'ocr_alive':self.worker.process.is_alive(),
+                    'capture_alive':self.capture.thread.is_alive(),'sent_frames':self.worker.sent_frames,
+                    'unknown_regions':len(self.content.pending_rectangles()),'sensitive_lines':len(self.hits),
+                    'control_ms':(time.monotonic()-tick_started)*1000,
+                    'blur_ms':getattr(self.overlay,'last_render_ms',None),
+                    'paint_ms':getattr(self.overlay,'last_paint_ms',None),'error':self.error})
         except Exception as error:
             # 保留可点击的控制面板；异常时不静默恢复内容。
             self.error = self.error or '控制流程异常：'+type(error).__name__
@@ -227,12 +268,13 @@ class ControlPanel(QWidget):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--semantic', action='store_true', help='启用小样本实验语义分类')
+    parser.add_argument('--diagnostics', action='store_true', help='记录分阶段耗时，不记录截图或文字')
     args = parser.parse_args()
     if args.semantic:
         parser.error('实验语义分类模块尚未交付，请移除--semantic使用规则模式')
     enable_dpi()
     app = QApplication(sys.argv[:1])
-    panel = ControlPanel(args.semantic)
+    panel = ControlPanel(args.semantic,diagnostics=args.diagnostics)
     panel.show()
     QTimer.singleShot(300, panel.start)
     sys.exit(app.exec())

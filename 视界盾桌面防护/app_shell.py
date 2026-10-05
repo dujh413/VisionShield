@@ -1,6 +1,7 @@
 """轻量界面不导入图像库；防护后端仅在启用时单独运行。"""
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 import uuid
@@ -492,7 +493,10 @@ class Shell(QWidget):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--preview', action='store_true', help='仅预览界面，不加载防护后端')
+    parser.add_argument('--diagnostics', action='store_true', help='仅记录运行耗时元数据')
     args = parser.parse_args()
+    if args.diagnostics:
+        os.environ['VISION_SHIELD_DIAGNOSTICS'] = '1'
     app = QApplication(sys.argv[:1])
     app.setQuitOnLastWindowClosed(False)
     name = 'VisionShield.Desktop.'+('Preview' if args.preview else 'Main')

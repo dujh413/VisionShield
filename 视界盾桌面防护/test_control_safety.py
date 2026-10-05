@@ -143,10 +143,36 @@ class ControlSafetyTests(unittest.TestCase):
         self.tick()
         self.assertTrue(self.panel.protecting)
         self.panel.worker.poll.return_value=[{'captured_at':self.now,'image':self.panel.latest.image,
-                                             'lines':[],'elapsed_ms':20}]
+                                             'lines':[{'text':'普通文字','confidence':.99,
+                                                       'polygon':[[8,8],[48,8],[48,24],[8,24]]}],
+                                             'unknown_regions':[],'elapsed_ms':20}]
         self.tick()
         self.assertFalse(self.panel.protecting)
         self.assertIsNone(self.panel.error)
+
+    def test_empty_unknown_ocr_cannot_restore_stale_protection(self):
+        self.panel.last_ocr_finished=self.now-20
+        self.panel.worker.poll.return_value=[{'captured_at':self.now,'image':self.panel.latest.image,
+                                             'lines':[],'unknown_regions':[(0,0,64,64)],'elapsed_ms':20}]
+        self.tick()
+        self.assertTrue(self.panel.protecting)
+        self.assertEqual(self.panel.last_ocr_finished,self.now-20)
+
+    def test_stable_captures_are_observed_but_not_repeatedly_submitted(self):
+        screen=Mock()
+        screen.geometry.return_value.width.return_value=64
+        screen.geometry.return_value.height.return_value=64
+        screen.devicePixelRatio.return_value=1
+        first=Frame(2,self.now,{},np.zeros((64,64,3),dtype=np.uint8))
+        self.panel.capture.latest.return_value=first
+        with patch('desktop_guard.QApplication.primaryScreen',return_value=screen):self.tick()
+        self.panel.worker.submit.assert_called_once()
+        self.now+=.2
+        second=Frame(3,self.now,{},first.image.copy())
+        self.panel.capture.latest.return_value=second
+        with patch('desktop_guard.QApplication.primaryScreen',return_value=screen):self.tick()
+        self.panel.worker.submit.assert_called_once()
+        self.assertEqual(self.panel.latest.frame_id,3)
 
 
 if __name__=='__main__':unittest.main()
