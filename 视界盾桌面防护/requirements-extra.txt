@@ -1,5 +1,6 @@
 uiautomation==2.0.29
 comtypes==1.4.17
 rapidocr_onnxruntime==1.4.4
-onnxruntime==1.30.0
+# RapidOCR may also pull the CPU distribution. After dependency installation,
+# run ..\Enable-GpuOcr.ps1 to ensure DirectML owns the shared onnxruntime module.
 onnxruntime-directml==1.24.4
