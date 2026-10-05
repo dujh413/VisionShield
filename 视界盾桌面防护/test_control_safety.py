@@ -23,7 +23,7 @@ class ControlSafetyTests(unittest.TestCase):
         p=self.panel
         p.started=self.now-40
         p.state=ProtectionState(restore_delay=0)
-        p.camera=Mock(last={'owner_verified':True},error=None)
+        p.camera=Mock(last={'owner_verified':True,'stranger_detected':False},error=None)
         p.camera.risk.return_value=(False,'机主独处且已确认')
         p.capture=Mock()
         p.capture.latest.return_value=None
@@ -64,8 +64,15 @@ class ControlSafetyTests(unittest.TestCase):
         self.tick()
         self.assertTrue(self.panel.protecting)
 
+    def test_owner_pose_or_missing_face_does_not_emit_stranger_alert(self):
+        self.panel.camera.risk.return_value=(True,'机主未确认')
+        self.tick()
+        self.assertTrue(self.panel.protecting)
+        self.assertIsNone(self.panel.alert_message)
+
     def test_detection_only_keeps_alert_without_shielding(self):
         self.panel.shield_enabled = False
+        self.panel.camera.last['stranger_detected'] = True
         self.panel.camera.risk.return_value = (True, '检测到旁人')
         self.tick()
         self.assertFalse(self.panel.protecting)
