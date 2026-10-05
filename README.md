@@ -10,6 +10,8 @@
 
 动态桌面性能路径已加入多处局部OCR、精确区域校验缓存、后台盒式模糊与最新帧调度，保留应用范围和区域追踪。可用 `--diagnostics` 记录匿名阶段耗时；合成CPU测试及真实设备验收边界见[动态桌面延迟修复与复测](docs/动态桌面延迟修复与复测_20261005.md)。
 
+准备桌面虚拟环境与本地模型后，在仓库根目录执行 `powershell -ExecutionPolicy Bypass -File .\Enable-GpuOcr.ps1`，修复 CPU/DirectML 发行包覆盖并验证真实 GPU OCR 算子。已启用环境不会重复下载运行时；GPU 验收与使用步骤见[GPU OCR 启用与验证](docs/GPU_OCR启用与验证_20261005.md)。该步骤仅加速 OCR，盒式模糊仍为 CPU 计算。
+
 现已提供 Windows `.exe` 便携测试版的构建配置，包含界面、摄像头与默认 ONNX OCR 全链路；完整软件目录在本机构建，不上传二进制或个人数据。使用、重建和升级说明见[Windows测试版打包说明](docs/Windows测试版打包说明.md)。
 
 ## 项目流程
