@@ -20,8 +20,14 @@ def load_models(root):
     detector_buffer = np.frombuffer((root / 'models/face_detection_yunet_2023mar.onnx').read_bytes(), dtype=np.uint8)
     recognizer_buffer = np.frombuffer((root / 'models/face_recognition_sface_2021dec.onnx').read_bytes(), dtype=np.uint8)
     empty = np.empty(0, dtype=np.uint8)
-    detector = cv2.FaceDetectorYN.create(
-        'onnx', detector_buffer, empty, (640, 480), 0.6, 0.45)
+    from onnx_yunet import MODEL_NAME, OnnxYuNet
+    dynamic_model = root/'models'/MODEL_NAME
+    try:
+        detector = OnnxYuNet(dynamic_model)
+    except Exception:
+        # 缺少新模型/运行时或初始化失败时，仍可使用原模型；不碰个人模板。
+        detector = cv2.FaceDetectorYN.create(
+            'onnx', detector_buffer, empty, (640, 480), 0.6, 0.45)
     try:
         recognizer = cv2.FaceRecognizerSF.create('onnx', recognizer_buffer, empty)
     except TypeError:

@@ -18,11 +18,11 @@ if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $report)) { throw '
 $result = Get-Content -LiteralPath $report -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($result.passed -ne $true -or $result.frozen -ne $true -or
     $result.region_tracking.passed -ne $true -or
-    @($result.checks.PSObject.Properties).Count -ne 11 -or
+    @($result.checks.PSObject.Properties).Count -ne 12 -or
     @($result.checks.PSObject.Properties | Where-Object { $_.Value -ne $true }).Count -ne 0 -or
     (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ne $hash) { throw 'Invalid or changed package verification result.' }
 $receipts = Join-Path $repo 'dist\.verified'
 New-Item -ItemType Directory -Force -Path $receipts | Out-Null
 @{ output_name=$OutputName; exe_sha256=$hash; passed=$true; verified_at_utc=[DateTime]::UtcNow.ToString('o') } |
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $receipts ($OutputName + '.json')) -Encoding UTF8
-Write-Output "Verified: $OutputName (11 checks, two start/stop cycles)."
+Write-Output "Verified: $OutputName (12 checks, two start/stop cycles)."
