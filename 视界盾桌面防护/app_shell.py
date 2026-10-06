@@ -100,6 +100,9 @@ class Backend(QObject):
         # 与multiprocessing的Windows venv启动方式一致，绕过重定向启动器，
         # 使QProcess和Job管理的是实际服务进程，而不是另一层python启动器。
         environment = QProcessEnvironment.systemEnvironment()
+        # NumPy的短小矩阵无需OpenBLAS默认多线程；在导入前限制，
+        # 子进程继承此设置，避免每个推理进程建立大量线程内存。
+        environment.insert('OPENBLAS_NUM_THREADS', '1')
         environment.insert('VISION_SHIELD_SHIELD_ENABLED', '1' if self.shield_enabled else '0')
         environment.insert('VISION_SHIELD_EFFECT_TEXT', self.effect_text)
         if not getattr(sys,'frozen',False) and sys.prefix != sys.base_prefix:
