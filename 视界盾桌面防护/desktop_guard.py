@@ -223,7 +223,8 @@ class ControlPanel(QWidget):
             sensor = self.camera if self.integrated else self.bridge
             sensor.poll()
             risk, reason = sensor.risk(now)
-            confirmed_risk = (bool(sensor.last and sensor.last.get('stranger_detected', False))
+            confirmed_risk = ((getattr(sensor,'new_stranger_event',False) is True or
+                               bool(sensor.last and sensor.last.get('stranger_detected', False)))
                               if self.integrated else risk)
             if risk and confirmed_risk and not self.last_risk and now-self.last_alert_at>=10:
                 self.alert_message = reason+('，已请求指定范围保护，请留意范围状态。' if self.drawing_enabled() else '，遮蔽已关闭，请注意屏幕内容。')
@@ -284,7 +285,13 @@ class ControlPanel(QWidget):
                              (self.latest is not None and now-self.latest.captured_at>1.5))
             if capture_stale:
                 reason += '；桌面采集未及时更新，临时保护'
-            risk_active = self.state.update(now, risk or bool(self.error) or stale or capture_stale or view["full"])
+            observation=(sensor.last if self.integrated else
+                         {'sequence':sensor.sequence,'received_at':sensor.received_at,'session':sensor.session}
+                         if sensor.last else None)
+            risk_active = self.state.update(now, risk or bool(self.error) or stale or capture_stale or view["full"],
+                                           observation=observation)
+            if self.state.evidence_error:
+                reason+='；相机观察未连续确认，等待新检测'
             protecting = risk_active and self.drawing_enabled()
             self.protecting = protecting
             full = protecting and (self.latest is None or self.last_ocr_finished is None or bool(self.error) or stale or capture_stale or view["full"])

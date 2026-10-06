@@ -120,7 +120,7 @@ def main():
                 fields=('sequence','faces_count','enrolled','owner_verified','owner_session_active',
                         'protect_request','stranger_detected','pose_grace','detection_ms','detail_scan',
                         'frame_size','face_sizes','face_confidences','frame_age_ms','processing_ms',
-                        'identity_diagnostics','weak_candidates','scans')
+                        'identity_diagnostics','weak_candidates','unconfirmed_faces','candidate_pending','scans')
                 sample={'elapsed':round(time.monotonic()-ready_at,2),
                         **{key:item[key] for key in fields if key in item}}
                 if args.guided:
