@@ -68,6 +68,15 @@ class ControlSafetyTests(unittest.TestCase):
         self.assertFalse(self.panel.overlay.set_masks.call_args.kwargs['full'])
         self.assertEqual(self.panel.overlay.set_masks.call_args.args[0],[(0,0,64,64)])
 
+    def test_future_or_nonfinite_capture_keeps_protection_when_owner_safe(self):
+        for stamp in (self.now+2,float('nan'),float('inf')):
+            with self.subTest(stamp=stamp):
+                self.panel.latest.captured_at=stamp
+                self.tick()
+                self.assertTrue(self.panel.protecting)
+                self.assertIn('桌面采集未及时更新',self.panel.status.text())
+                self.assertFalse(self.panel.overlay.set_masks.call_args.kwargs['full'])
+
     def test_stale_ocr_forces_full_protection_even_when_owner_safe(self):
         self.panel.last_ocr_finished=self.now-20
         self.tick()
@@ -298,7 +307,8 @@ class ControlSafetyTests(unittest.TestCase):
         self.assertFalse(self.panel.protecting)
         self.assertIsNone(self.panel.error)
 
-    def test_empty_result_keeps_unknown_protected(self):
+    def test_empty_result_keeps_unknown_protected_when_camera_reports_risk(self):
+        self.panel.camera.risk.return_value=(True,'检测到旁人')
         self.panel.latest.frame_id=2
         self.panel.content.observe(self.panel.latest)
         self.panel.worker.poll.return_value=[{'frame_id':2,'captured_at':self.now,
@@ -306,6 +316,62 @@ class ControlSafetyTests(unittest.TestCase):
         self.tick()
         self.assertTrue(self.panel.protecting)
         self.assertFalse(self.panel.overlay.set_masks.call_args.kwargs['full'])
+
+    def confirm_owner(self):
+        self.panel.state=ProtectionState(restore_delay=1)
+        for advance in (0,.4,.7):
+            self.now+=advance
+            self.panel.latest.captured_at=self.now
+            self.tick()
+        self.assertFalse(self.panel.protecting)
+        self.assertEqual(self.panel.overlay.set_masks.call_args.args[0],[])
+        self.assertIn('正常显示',self.panel.status.text())
+
+    def test_owner_alone_recovers_with_empty_ocr_in_both_display_modes(self):
+        for effect in ('遮挡','16'):
+            with self.subTest(effect=effect):
+                self.panel.apply_preferences({'effect_text':effect})
+                self.panel.latest.frame_id+=1
+                self.panel.content.observe(self.panel.latest)
+                self.panel.content.accept({'frame_id':self.panel.latest.frame_id,
+                    'captured_at':self.now,'image':self.panel.latest.image,
+                    'lines':[],'unknown_regions':[]},self.now)
+                self.assertTrue(self.panel.content.view(self.now)['full'])
+                self.confirm_owner()
+
+    def test_owner_alone_recovers_while_first_ocr_is_loading(self):
+        self.panel.content.result=None
+        self.panel.last_ocr_finished=None
+        self.panel.started=self.now
+        self.panel.ready=False
+        self.assertTrue(self.panel.content.view(self.now)['full'])
+        self.confirm_owner()
+        self.assertIn('OCR：加载中',self.panel.status.text())
+
+    def test_owner_alone_recovers_on_large_dynamic_content_changes(self):
+        self.panel.latest=Frame(2,self.now,self.panel.latest.monitor_rect,
+                                np.full((64,64,3),255,dtype=np.uint8))
+        self.panel.content.observe(self.panel.latest)
+        self.assertTrue(self.panel.content.view(self.now)['full'])
+        self.confirm_owner()
+
+    def test_expired_ocr_still_protects_before_legacy_fifteen_second_timeout(self):
+        self.now+=10.1
+        self.panel.latest.captured_at=self.now
+        self.tick()
+        self.assertTrue(self.panel.protecting)
+        self.assertIn('OCR结果未及时更新',self.panel.status.text())
+
+    def test_complete_camera_history_allows_latest_only_queue_recovery(self):
+        self.panel.state=ProtectionState(restore_delay=1)
+        self.panel.camera.last.update(last_risk_sequence=0,last_risk_observed_at=None)
+        for advance in (0,.4,.7):
+            self.now+=advance
+            self.panel.latest.captured_at=self.now
+            self.panel.camera.last['sequence']+=2
+            self.tick()
+        self.assertFalse(self.panel.protecting)
+        self.assertNotIn('相机观察未连续确认',self.panel.status.text())
 
     def test_empty_mode_suppresses_exception_masks_without_stopping_detection(self):
         self.panel.apply_preferences({'effect_text':''})

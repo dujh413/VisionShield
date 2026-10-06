@@ -325,21 +325,24 @@ class ControlPanel(QWidget):
             self.valid_image = self.content.result['image'] if view['coordinates_valid'] else None
             if not self.worker.process.is_alive():
                 self.error = self.error or 'OCR进程已退出'
-            stale = (self.last_ocr_finished is None and now-self.started>30) or (self.last_ocr_finished is not None and now-self.last_ocr_finished>15)
+            stale = (self.last_ocr_finished is None and now-self.started>30) or (self.last_ocr_finished is not None and now-self.last_ocr_finished>15) or view.get('result_expired',False)
             if stale:
                 # 持续动画或OCR过慢时不将陈旧结果当作有效坐标。
                 reason += '；OCR结果未及时更新，临时保护'
             capture_stale = ((self.latest is None and now-self.started>1.5) or
-                             (self.latest is not None and now-self.latest.captured_at>1.5))
+                             (self.latest is not None and not 0 <= now-self.latest.captured_at <= 1.5))
             if capture_stale:
                 reason += '；桌面采集未及时更新，临时保护'
             observation=(sensor.last if self.integrated else
                          {'sequence':sensor.sequence,'received_at':sensor.received_at,'session':sensor.session}
                          if sensor.last else None)
-            risk_active = self.state.update(now, risk or bool(self.error) or stale or capture_stale or view["full"],
+            # 内容待分析决定有风险时遮哪些范围；不把空白/动画画面当作旁人。
+            risk_active = self.state.update(now, risk or bool(self.error) or stale or capture_stale,
                                            observation=observation)
             if self.state.evidence_error:
                 reason+='；相机观察未连续确认，等待新检测'
+            elif risk_active and not (risk or self.error or stale or capture_stale):
+                reason+='；正在确认风险解除'
             protecting = risk_active and self.drawing_enabled()
             self.protecting = protecting
             full = protecting and (self.latest is None or self.last_ocr_finished is None or bool(self.error) or stale or capture_stale or view["full"])

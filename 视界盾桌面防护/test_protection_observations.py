@@ -8,6 +8,11 @@ def observation(sequence, stamp, session=None, received=False):
     return {'sequence':sequence, 'received_at' if received else 'observed_at':stamp, 'session':session}
 
 
+def recorded(sequence, stamp, risk_sequence=0, risk_at=None, session=None):
+    return {**observation(sequence,stamp,session), 'last_risk_sequence':risk_sequence,
+            'last_risk_observed_at':risk_at}
+
+
 class ObservationRecoveryTests(unittest.TestCase):
     def test_one_safe_packet_repeated_by_ui_cannot_remove_protection(self):
         state=ProtectionState()
@@ -46,6 +51,64 @@ class ObservationRecoveryTests(unittest.TestCase):
         self.assertTrue(state.update(1.9,False,observation(6,1.9)))
         self.assertIsNone(state.evidence_error)
         self.assertFalse(state.update(2.3,False,observation(7,2.3)))
+
+    def test_latest_only_safe_packets_with_complete_history_recover(self):
+        state=ProtectionState()
+        for index in range(6):
+            protecting=state.update(index*.25,False,recorded(1+index*3,index*.25))
+        self.assertFalse(protecting)
+        self.assertIsNone(state.evidence_error)
+        self.assertFalse(state.update(1.4,False,recorded(22,1.4)))
+
+    def test_skipped_uncertain_observation_cannot_borrow_old_safe_duration(self):
+        state=ProtectionState()
+        state.update(0,False,recorded(1,0))
+        state.update(.8,False,recorded(3,.8))
+        self.assertTrue(state.update(1.1,False,recorded(6,1.1,4,.9)))
+        self.assertIsNone(state.safe_since)
+        self.assertTrue(state.update(1.3,False,recorded(8,1.3,4,.9)))
+        self.assertTrue(state.update(1.9,False,recorded(11,1.9,4,.9)))
+        self.assertFalse(state.update(2.4,False,recorded(14,2.4,4,.9)))
+
+    def test_complete_history_does_not_bridge_observation_outage(self):
+        for next_sequence in (2,20):
+            with self.subTest(next_sequence=next_sequence):
+                state=ProtectionState()
+                state.update(0,False,recorded(1,0))
+                self.assertTrue(state.update(2,False,recorded(next_sequence,2)))
+                self.assertEqual(state.safe_since,2)
+                self.assertEqual(state.evidence_error,'gap')
+
+    def test_complete_history_does_not_turn_repeated_frame_into_safe_duration(self):
+        state=ProtectionState()
+        packet=recorded(1,0)
+        state.update(0,False,packet)
+        self.assertTrue(state.update(1.2,False,packet))
+        self.assertTrue(state.update(1.6,False,packet))
+        self.assertEqual(state.evidence_error,'stale')
+
+    def test_invalid_missing_or_regressed_complete_history_fails_closed(self):
+        invalid=(recorded(3,1.1,True,None),recorded(3,1.1,4,1),
+                 recorded(3,1.1,0,1),recorded(3,1.1,1,None),
+                 recorded(3,1.1,1,float('nan')),recorded(3,1.1,1,2),
+                 {'sequence':3,'observed_at':1.1,'last_risk_sequence':0},
+                 observation(3,1.1),recorded(3,1.1,0,None),recorded(3,1.1,1,.2))
+        for packet in invalid:
+            with self.subTest(packet=packet):
+                state=ProtectionState()
+                state.update(0,True,recorded(1,0,1,0))
+                state.update(.9,False,recorded(2,.9,1,0))
+                self.assertTrue(state.update(1.1,False,packet))
+                self.assertIsNone(state.safe_since)
+                self.assertEqual(state.last_observation,(None,2,.9))
+
+    def test_new_session_with_complete_history_starts_its_own_safe_interval(self):
+        state=ProtectionState()
+        state.update(0,False,recorded(20,0,session='first'))
+        self.assertTrue(state.update(.9,False,recorded(1,.9,session='second')))
+        self.assertEqual(state.evidence_error,'session_changed')
+        self.assertTrue(state.update(1.2,False,recorded(4,1.2,session='second')))
+        self.assertFalse(state.update(2,False,recorded(8,2,session='second')))
 
     def test_session_switch_cannot_borrow_previous_safe_duration(self):
         state=ProtectionState()
