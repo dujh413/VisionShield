@@ -40,7 +40,8 @@ class Fixture(QWidget):
         self.bridge.poll()
         if self.sent is not None and self.bridge.last and self.bridge.last['sequence']==self.sequence:
             risk,_=self.bridge.risk(time.monotonic())
-            self.mask=self.state.update(time.monotonic(),risk)
+            self.mask=self.state.update(time.monotonic(),risk,observation={
+                'sequence':self.bridge.sequence,'received_at':self.bridge.received_at,'session':self.bridge.session})
             self.update()
 
     def paintEvent(self,event):

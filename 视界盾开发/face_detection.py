@@ -66,6 +66,7 @@ class FaceScanner:
         self.last_detail_at = None
         self.last_metrics = {}
         self.weak_candidates = []
+        self.current_unconfirmed_count = 0
         self.tile_index = 0
         self.focus = None
         self.focus_misses = 0
@@ -73,6 +74,7 @@ class FaceScanner:
         self.scan_metrics = []
 
     def _confirm_candidates(self, faces, now):
+        self.current_unconfirmed_count = 0
         pending = [item for item in self.weak_candidates if 0 <= now-item['at'] <= .95]
         accepted, seen = [], set()
         for face in faces:
@@ -95,6 +97,7 @@ class FaceScanner:
                     break
             if match is None:
                 pending.append({'face':face,'at':now,'hits':1})
+                self.current_unconfirmed_count += 1
             else:
                 seen.add(match)
                 item=pending[match]
@@ -165,16 +168,31 @@ class FaceScanner:
         self.scan_metrics=[]
         faces = self._detect(image)
         full_count=len(faces)
+        strong_full=[face for face in faces if min(float(face[2]),float(face[3]))>=80 and float(face[14])>=.78]
+        focus_is_full=False
+        if self.focus is not None:
+            target=self.focus['face']
+            x,y,w,h=map(float,target[:4])
+            for face in strong_full:
+                a,b,c,d=map(float,face[:4])
+                intersection=max(0,min(x+w,a+c)-max(x,a))*max(0,min(y+h,b+d)-max(y,b))
+                iou=intersection/max(w*h+c*d-intersection,1e-9)
+                landmark_distance=np.linalg.norm(face[4:14].reshape(5,2)-target[4:14].reshape(5,2),axis=1)
+                if iou>=.55 and float(landmark_distance.mean())<min(w,c)*.2:
+                    focus_is_full=True
+                    break
         detailed = self.last_detail_at is None or now-self.last_detail_at >= self.detail_interval
         focus_attempted=False
         if detailed:
             count=2
             if self.focus is not None and 0 <= now-self.focus['at'] <= .95:
                 crop,origin=self._focus_crop(image)
-                for patch,label in ((crop,'focus'),(self._contrast(crop),'focus_contrast')):
+                patches=((self._contrast(crop),'focus_contrast'),) if focus_is_full else (
+                    (crop,'focus'),(self._contrast(crop),'focus_contrast'))
+                for patch,label in patches:
                     faces.extend(self._detect(patch,origin,True,max_edge=640,frame_size=(width,height),label=label))
                 focus_attempted=True
-                count=1
+                count=2 if focus_is_full else 1
             # 六块重叠分区：1280×720摄像头中640×432→1280×864，实现2倍放大。
             tile_width,tile_height=max(1,round(width*.5)),max(1,round(height*.6))
             tiles=[(x,y) for y in (0,height-tile_height)
@@ -189,7 +207,10 @@ class FaceScanner:
             self.last_detail_at = now
         candidates=merge_faces(faces, (width, height),full_count=full_count)
         result = self._confirm_candidates(candidates,now)
-        small=[face for face in candidates if float(face[2]) <= width*.2 and float(face[3]) <= height*.45]
+        small=[face for face in candidates if float(face[2]) <= width*.2 and float(face[3]) <= height*.45
+               and (face[14]>=.78 or
+                    np.all((face[[4,6,8,10,12]]>=face[0]) & (face[[4,6,8,10,12]]<=face[0]+face[2]))
+                    and np.all((face[[5,7,9,11,13]]>=face[1]) & (face[[5,7,9,11,13]]<=face[1]+face[3])))]
         match=next((face for face in small if self.focus is not None and self._near(face,self.focus['face'])),None)
         if match is not None:
             self.focus={'face':match,'at':now};self.focus_misses=0
@@ -205,6 +226,7 @@ class FaceScanner:
                 self.focus={'face':smallest,'at':now};self.focus_misses=0
         self.last_metrics = {'detection_ms':round((time.perf_counter()-before)*1000, 2),
                              'detail_scan':bool(detailed), 'frame_size':[int(width), int(height)],
+                             'unconfirmed_faces':int(self.current_unconfirmed_count),
                              'weak_candidates':int(sum(int(.6 <= face[14] < .78) for face in candidates))}
         if self.diagnostics:self.last_metrics['scans']=self.scan_metrics
         return result

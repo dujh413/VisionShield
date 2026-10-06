@@ -23,6 +23,20 @@ def identity_score_for_quality(score, sharpness):
     return float(score) if sharpness >= 60 or score >= .60 else None
 
 
+class StrangerJournal:
+    """后续状态保留真实旁人观察边沿；短暂风险保持不产生新观察。"""
+    def __init__(self):
+        self.sequence=0
+        self.observed_at=None
+
+    def record(self, sequence, observed_at, detected):
+        if detected:
+            self.sequence=sequence
+            self.observed_at=observed_at
+        return {'last_stranger_sequence':self.sequence,
+                'last_stranger_observed_at':self.observed_at}
+
+
 def camera_main(root, stop, outputs, preview=False, diagnostics=False, template_path=None):
     camera = None
     reader = None
@@ -47,6 +61,7 @@ def camera_main(root, stop, outputs, preview=False, diagnostics=False, template_
                 raise ValueError('Invalid owner template')
         tracker, presence = ShortTracker(), OwnerPresence()
         scanner, bystander = FaceScanner(detector,diagnostics=diagnostics), BystanderHold()
+        journal=StrangerJournal()
         camera = open_camera(0, 'auto', resolution=(1280, 720))
         reader = LatestCameraFrame(camera)
         sequence = 0
@@ -56,11 +71,12 @@ def camera_main(root, stop, outputs, preview=False, diagnostics=False, template_
             ok, image = reader.read()
             if not ok:
                 raise RuntimeError('Camera read failed')
+            observed_at = reader.last_consumed_at
             height, width = image.shape[:2]
-            faces = scanner.detect(image, before)
+            faces = scanner.detect(image, observed_at)
             boxes = [(float(f[0])/width, float(f[1])/height,
                       float(f[0]+f[2])/width, float(f[1]+f[3])/height) for f in faces]
-            tracks = tracker.update(boxes, int((before-started)*1000))
+            tracks = tracker.update(boxes, int((observed_at-started)*1000))
             observations = []
             identity_diagnostics=[]
             scores = []
@@ -79,15 +95,19 @@ def camera_main(root, stop, outputs, preview=False, diagnostics=False, template_
                         details['identity_threshold']=.60 if details.get('sharpness',0)<60 else .45
                         details['identity_reason']='quality_match_rejected' if raw_score is not None and score is None else 'available'
                         identity_diagnostics.append(identity_metadata(details,raw_score,frontal_face(face),track.reliable))
-            identity = presence.update(before, observations, enrolled=templates is not None)
-            if templates is not None and bystander.update(before, identity['stranger_detected']):
+            identity = presence.update(observed_at, observations, enrolled=templates is not None)
+            candidate_pending=templates is not None and scanner.current_unconfirmed_count>0
+            if candidate_pending:identity['protect_request']=True
+            event=journal.record(sequence+1,observed_at,identity['stranger_detected'])
+            if templates is not None and bystander.update(observed_at, identity['stranger_detected']):
                 identity.update(stranger_detected=True, protect_request=True,
                                 owner_session_active=False, pose_grace=False)
             sequence += 1
             published_at = time.monotonic()
-            item = {'sequence':sequence, 'observed_at':before,
+            item = {'sequence':sequence, 'observed_at':observed_at,
                        **identity, 'faces_count':len(faces),
-                       'enrolled':templates is not None, **scanner.last_metrics,
+                       'enrolled':templates is not None, 'candidate_pending':candidate_pending,
+                       **scanner.last_metrics, **event,
                        'frame_age_ms':round((published_at-reader.last_consumed_at)*1000,2),
                        'processing_ms':round((published_at-before)*1000,2),
                        'face_sizes':[[round(float(f[2])),round(float(f[3]))] for f in faces],
@@ -120,17 +140,42 @@ class CameraWorker:
         self.process = ctx.Process(target=camera_main, args=(root,self.stop,self.outputs,preview,diagnostics,owner_path), daemon=True)
         self.process.start()
         self.last, self.error = None, None
+        self.last_stranger_sequence=0
+        self.new_stranger_event=False
+
+    def accept_status(self, item):
+        """不让排队/丢旧状态消掉真实风险事件，拒绝倒序或无效状态。"""
+        if not isinstance(item,dict):
+            self.error='Invalid camera status'
+            return False
+        sequence=item.get('sequence');observed_at=item.get('observed_at')
+        marker=item.get('last_stranger_sequence',0)
+        event_at=item.get('last_stranger_observed_at')
+        if (type(sequence) is not int or sequence<1 or type(observed_at) not in (int,float)
+                or not isfinite(observed_at) or type(marker) is not int or not 0<=marker<=sequence
+                or any(type(item.get(key)) is not bool for key in ('enrolled','protect_request','stranger_detected'))
+                or (marker and (type(event_at) not in (int,float) or not isfinite(event_at) or event_at>observed_at))):
+            self.error='Invalid camera status'
+            return False
+        if self.last and (sequence<=self.last['sequence'] or observed_at<=self.last['observed_at']):
+            return False
+        if marker>self.last_stranger_sequence:
+            self.last_stranger_sequence=marker
+            self.new_stranger_event=True
+        self.last=item
+        return True
 
     def poll(self):
+        self.new_stranger_event=False
         while True:
             try:
                 item = self.outputs.get_nowait()
             except queue.Empty:
                 break
-            if 'error' in item:
+            if isinstance(item,dict) and 'error' in item:
                 self.error = item['error']
             else:
-                self.last = item
+                self.accept_status(item)
         if not self.process.is_alive():
             self.error = self.error or 'Camera process exited'
 
@@ -139,12 +184,15 @@ class CameraWorker:
             return True, '摄像头异常：'+self.error
         if self.last is None:
             return True, '摄像头启动中'
-        if now-self.last['observed_at'] > 1.5:
+        if now < self.last['observed_at'] or now-self.last['observed_at'] > 1.5:
             return True, '摄像头状态已过期'
         if not self.last['enrolled']:
             return True, '请先在设置中登记机主'
-        risk = self.last['protect_request']
+        if self.new_stranger_event:
+            return True, '近期检测到旁人，等待连续安全观察后恢复'
+        risk = self.last['protect_request'] or self.last['stranger_detected']
         reason = ('检测到陌生人或旁人' if self.last.get('stranger_detected') else
+                  '候选人脸待确认，暂时保护' if self.last.get('candidate_pending') else
                   '机主短时姿态宽限' if self.last.get('pose_grace') else
                   '机主未确认' if risk else '机主独处且已确认')
         return risk, reason

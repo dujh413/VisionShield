@@ -43,6 +43,8 @@
 
 本轮指定范围、滑杆、闪烁与人脸修复的代码和实测依据见[指定范围与人脸检测修复报告](docs/指定范围与人脸检测修复报告_20261005.md)。持续检测身后模糊/被遮挡旁人的准确性尚未通过实人验收，最后的人脸改动仅完成自动检查。此前软件包运行、即时遮蔽切换和内存记录见[历史GPU软件包验收](docs/新版GPU软件包验收_20261005.md)。完整识别后端仍有较高内存峰值，不能把前端轻量视为全系统低内存。
 
+沿用上次人脸测试的后续改进见[人脸检测后续改进记录](docs/人脸检测后续改进记录_20261006.md)。恢复现在由连续新鲜的相机观察确认，重复读取同一安全帧不推进恢复；有界队列保留最近实际旁人检测事件，避免丢弃旧状态时漏掉保护与提示。检测速度和公开样本算法回归与真实双人效果分别记录。
+
 ## 仓库状态
 
 已导入本地开发源码、测试和项目方案。目录结构：
@@ -76,7 +78,7 @@ A/B/C为角色占位，实际成员加入后再分配。
 
 ## 接口约定
 
-摄像头状态包括owner_verified、protect_request、faces_count、sequence、session、updated_at。文字结果保留text、polygon、source、frame/sequence、采集和完成时间以及覆盖状态。坐标统一为物理屏幕像素；接收端检查时效、来源和坐标有效性。不同时间来源的结果不能未经检查直接拼接。
+统一软件的摄像头进程传递owner_verified、owner_session_active、protect_request、stranger_detected、enrolled、faces_count、sequence及单调时钟observed_at，并累计携带last_stranger_sequence/last_stranger_observed_at。独立旧版身份接口通过本机UDP传sequence/session/updated_at，接收端另记received_at用于恢复观察时效。文字结果保留text、polygon、source、frame/sequence、采集和完成时间以及覆盖状态。坐标统一为物理屏幕像素；接收端检查时效、来源和坐标有效性。不同时间来源的结果不能未经检查直接拼接。
 
 并行开发时进一步补齐字段类型、过期阈值、异常处理和接口版本，并与实际代码一致。
 

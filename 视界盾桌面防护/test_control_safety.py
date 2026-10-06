@@ -27,7 +27,7 @@ class ControlSafetyTests(unittest.TestCase):
         p=self.panel
         p.started=self.now-40
         p.state=ProtectionState(restore_delay=0)
-        p.camera=Mock(last={'owner_verified':True,'stranger_detected':False},error=None)
+        p.camera=Mock(last={'owner_verified':True,'stranger_detected':False,'sequence':1,'observed_at':self.now},error=None)
         p.camera.risk.return_value=(False,'机主独处且已确认')
         p.capture=Mock()
         p.capture.latest.return_value=None
@@ -54,6 +54,9 @@ class ControlSafetyTests(unittest.TestCase):
         self.app.processEvents()
 
     def tick(self):
+        self.now+=.001
+        self.panel.camera.last['sequence']+=1
+        self.panel.camera.last['observed_at']=self.now
         with patch('desktop_guard.time.monotonic',return_value=self.now):
             self.panel.tick()
 
@@ -74,6 +77,36 @@ class ControlSafetyTests(unittest.TestCase):
         self.panel.camera.risk.return_value=(True,'检测到旁人')
         self.tick()
         self.assertTrue(self.panel.protecting)
+
+    def test_same_safe_camera_packet_does_not_restore_after_ui_wait(self):
+        self.panel.state=ProtectionState(restore_delay=1)
+        self.tick()
+        self.assertTrue(self.panel.protecting)
+        self.now+=1.1
+        self.panel.latest.captured_at=self.now
+        with patch('desktop_guard.time.monotonic',return_value=self.now):
+            self.panel.tick()
+        self.assertTrue(self.panel.protecting)
+        self.tick()
+        self.assertFalse(self.panel.protecting)
+
+    def test_lost_camera_packet_resets_recovery_without_stranger_alert(self):
+        self.panel.state=ProtectionState(restore_delay=1)
+        self.tick()
+        self.now+=1.1
+        self.panel.latest.captured_at=self.now
+        self.panel.camera.last['sequence']+=2
+        self.tick()
+        self.assertTrue(self.panel.protecting)
+        self.assertIsNone(self.panel.alert_message)
+        self.assertIn('相机观察未连续确认',self.panel.status.text())
+
+    def test_carried_stranger_event_alerts_even_when_latest_face_packet_is_safe(self):
+        self.panel.camera.new_stranger_event=True
+        self.panel.camera.risk.return_value=(True,'近期检测到旁人')
+        self.tick()
+        self.assertTrue(self.panel.protecting)
+        self.assertIsNotNone(self.panel.alert_message)
 
     def test_missing_selection_is_visible_even_while_owner_is_safe(self):
         self.panel.app_profiles={'missing':{'mode':'window','binding':{'handle':99,'pid':99}}}
@@ -101,6 +134,13 @@ class ControlSafetyTests(unittest.TestCase):
 
     def test_owner_pose_or_missing_face_does_not_emit_stranger_alert(self):
         self.panel.camera.risk.return_value=(True,'机主未确认')
+        self.tick()
+        self.assertTrue(self.panel.protecting)
+        self.assertIsNone(self.panel.alert_message)
+
+    def test_pending_candidate_protects_without_stranger_alert(self):
+        self.panel.camera.last['candidate_pending']=True
+        self.panel.camera.risk.return_value=(True,'候选人脸待确认，暂时保护')
         self.tick()
         self.assertTrue(self.panel.protecting)
         self.assertIsNone(self.panel.alert_message)
