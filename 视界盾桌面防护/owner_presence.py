@@ -13,6 +13,11 @@ class OwnerPresence:
 
     def update(self, now, observations, enrolled=True):
         # observations: track_id, reliable, bbox(normalized), score, frontal.
+        # 新匹配不能先续期已经过期或时间倒退的机主会话。
+        if self.last_owner_at is not None and not 0 <= now-self.last_owner_at <= self.grace:
+            self.confirmed = False
+            self.count, self.candidate = 0, None
+            self.last_owner_at = None
         owner = [o for o in observations if o['reliable'] and o['score'] is not None and o['score'] >= .45]
         stranger = len(observations) > 1 or any(
             o['frontal'] and o['score'] is not None and o['score'] < .25 for o in observations)
@@ -35,9 +40,12 @@ class OwnerPresence:
         grace = self.confirmed and self.last_owner_at is not None and 0 <= now-self.last_owner_at <= self.grace
         if grace and observations and not verified:
             a, b = self.last_box, observations[0]['bbox']
-            # 位置明显改变不能借用上一位机主的宽限。
+            # 位置或尺寸明显改变不能借用上一位机主的宽限。
             distance = hypot((a[0]+a[2]-b[0]-b[2])/2, (a[1]+a[3]-b[1]-b[3])/2)
-            grace = distance <= max(a[2]-a[0], a[3]-a[1])*.6 and observations[0]['reliable']
+            area_a = (a[2]-a[0])*(a[3]-a[1])
+            area_b = (b[2]-b[0])*(b[3]-b[1])
+            similar_size = min(area_a,area_b)>0 and max(area_a,area_b)/min(area_a,area_b)<=2.5
+            grace = similar_size and distance <= max(a[2]-a[0], a[3]-a[1])*.6 and observations[0]['reliable']
         active = enrolled and not stranger and (verified or grace)
         if not active:
             self.confirmed = False

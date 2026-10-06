@@ -364,6 +364,8 @@ class Shell(QWidget):
         self.scope_summary.setText(
             f'保护范围：已选 {local} 处局部、{whole} 个整窗，仅处理有效范围。无法定位时需重新选择。' if profiles else
             '保护范围：自动按应用与内容保护。需要限定范围时，请到设置中选择局部或整窗。')
+        if any(profile['mode']=='window' and not profile.get('binding') for profile in profiles.values()):
+            self.scope_summary.setText(self.scope_summary.text()+'\n整窗范围在软件重启后需到设置中重新点击目标窗口。')
 
     def load_profiles(self):
         from app_scope import valid_profiles
@@ -550,7 +552,7 @@ class Shell(QWidget):
         local_note.setWordWrap(True)
         layout.addWidget(local_note)
         layout.addWidget(scope_window)
-        whole_note = QLabel('点击一个应用窗口，保护该窗口的全部可见内容。\n跟随窗口拖动与缩放，其他窗口保持清晰。')
+        whole_note = QLabel('点击一个应用窗口，保护该窗口的全部可见内容。\n跟随窗口拖动与缩放，其他窗口保持清晰。\n软件重启后需重新点击目标窗口；不会自动改绑其他窗口。')
         whole_note.setObjectName('caption')
         whole_note.setWordWrap(True)
         layout.addWidget(whole_note)

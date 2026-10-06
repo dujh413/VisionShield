@@ -53,6 +53,83 @@ class UIATrackerTests(unittest.TestCase):
             self.assertEqual(self.resolve(now=100.2),self.rect)
         com.assert_not_called()
 
+    def test_probe_validation_does_not_consume_or_submit_async_probe_pixel_results(self):
+        self.prime()
+        self.worker.finish(None)
+        submitted=len(self.worker.requests)
+        scope=self.tracker.resolve({self.window['key']:self.profile},[self.window],self.image,
+                                   now=100.3,asynchronous=False)
+        self.assertEqual(scope[self.window['key']]['rect'],self.rect)
+        self.assertEqual(len(self.worker.requests),submitted)
+        self.assertEqual(len(self.worker.outputs),1)
+        self.assertIsNone(self.resolve(now=100.4))
+
+    def test_probe_validation_still_rejects_changed_client_pixels(self):
+        self.prime()
+        image=self.image.copy();image[90,90,0]-=1
+        scope=self.tracker.resolve({self.window['key']:self.profile},[self.window],image,
+                                   now=100.3,asynchronous=False)
+        self.assertIsNone(scope[self.window['key']]['rect'])
+
+    def test_owned_readonly_frame_hashes_once_across_repeated_polls(self):
+        self.image.flags.writeable=False
+        with patch('region_tracker.client_signature',wraps=client_signature) as digest:
+            self.prime()
+            for now in (100.2,100.3,100.4):self.assertEqual(self.resolve(now=now),self.rect)
+        self.assertEqual(digest.call_count,1)
+
+    def test_new_readonly_frame_single_pixel_change_invalidates_signature(self):
+        self.image.flags.writeable=False
+        with patch('region_tracker.client_signature',wraps=client_signature) as digest:
+            self.prime()
+            changed=self.image.copy();changed[70,60,0]-=1;changed.flags.writeable=False
+            self.assertIsNone(self.resolve(changed,now=100.2))
+        self.assertEqual(digest.call_count,2)
+        self.assertEqual(self.tracker.results,{})
+
+    def test_readonly_view_rehashes_after_writable_base_changes(self):
+        base=self.image
+        self.image=base.view();self.image.flags.writeable=False
+        with patch('region_tracker.client_signature',wraps=client_signature) as digest:
+            self.prime()
+            base[70,60,0]-=1
+            self.assertIsNone(self.resolve(now=100.2))
+        self.assertEqual(digest.call_count,3)
+        self.assertEqual(self.tracker.signature_cache,{})
+
+    def test_frame_made_writable_rehashes_same_array_mutation(self):
+        self.image.flags.writeable=False
+        self.prime()
+        self.image.flags.writeable=True;self.image[70,60,0]-=1
+        with patch('region_tracker.client_signature',wraps=client_signature) as digest:
+            self.assertIsNone(self.resolve(now=100.2))
+        self.assertEqual(digest.call_count,1)
+        self.assertEqual(self.tracker.signature_cache,{})
+
+    def test_client_geometry_change_rehashes_readonly_frame(self):
+        self.image.flags.writeable=False
+        self.prime()
+        with patch('region_tracker.client_signature',wraps=client_signature) as digest:
+            self.assertIsNone(self.resolve(window=dict(self.window,client=(20,30,210,160)),now=100.2))
+        self.assertEqual(digest.call_count,1)
+
+    def test_readonly_digest_cache_does_not_extend_bounds_expiry(self):
+        self.image.flags.writeable=False
+        self.prime()
+        with patch('region_tracker.client_signature',wraps=client_signature) as digest:
+            self.assertIsNone(self.resolve(now=100.81))
+        digest.assert_not_called()
+
+    def test_readonly_digest_cache_is_bounded_by_active_profiles_and_cleared_on_close(self):
+        self.image.flags.writeable=False
+        self.prime()
+        self.assertEqual(len(self.tracker.signature_cache),1)
+        self.assertEqual(self.tracker.resolve({},[],self.image,now=100.2),{})
+        self.assertEqual(self.tracker.signature_cache,{})
+        self.resolve(now=100.3)
+        self.tracker.close()
+        self.assertEqual(self.tracker.signature_cache,{})
+
     def test_any_internal_pixel_change_invalidates_cached_box_immediately(self):
         self.prime()
         self.image[70,60,0]-=1  # Same ndarray object must not hide a changed layout.

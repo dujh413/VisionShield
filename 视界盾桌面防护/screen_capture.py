@@ -40,6 +40,8 @@ class ScreenCapture:
         started=time.monotonic()
         self.sequence += 1
         image = np.asarray(self.source.grab(self.monitor))[:, :, :3].copy()
+        # Each capture owns fresh pixels; consumers may share but never alter them.
+        image.flags.writeable = False
         return Frame(self.sequence, started, self.monitor, image, (time.monotonic()-started)*1000)
 
     def close(self):

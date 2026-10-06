@@ -153,19 +153,67 @@ class ControlPanel(QWidget):
                 self.overlay.hide()
                 self.protecting = False
 
-    def verify_range_capture(self, rectangles):
+    def verify_range_capture(self, rectangles, windows=None):
         if self.exclusion_verified:return True
-        from capture_probe import verify_exclusion
+        from capture_probe import ProbeScopeChanged, verify_exclusion
+        from app_scope import application_masks, intersect, subtract, window_inventory
         self.probe_active=True
         capture=None;overlay=self.overlay
         try:
             capture=ScreenCapture()
+            monitor=self.latest.monitor_rect
+            inventory=window_inventory(monitor) if windows is None else windows
+            profiles_token=repr(self.app_profiles)
+            effect=self.effect
+            image=self.latest.image
+            scope_checked_at=time.monotonic()
+            pixel_clients=[window['client'] for window in inventory
+                if (profile:=self.app_profiles.get(window['key'])) and profile['mode']=='tracked'
+                and (profile['anchor']['type']!='native' or profile.get('features') is not None)
+                and any(intersect(window['client'],rectangle) for rectangle in rectangles)]
+            def scope_is_current(probe_box,probe_handle):
+                if (self.overlay is not overlay or not self.drawing_enabled()
+                        or self.effect!=effect or repr(self.app_profiles)!=profiles_token):return False
+                current=[window for window in window_inventory(monitor) if window['handle']!=probe_handle]
+                resolved={}
+                if self.app_profiles:
+                    # Probe pixels are expected capture changes. Keep async UIA
+                    # work out of this nested loop; native geometry and guarded
+                    # fresh client pixels validate the same initial async proof
+                    # throughout this short wait, without borrowing newer work.
+                    resolved=self.region_tracker.resolve(self.app_profiles,current,image,
+                        (monitor['left'],monitor['top']),now=scope_checked_at,asynchronous=False)
+                masks,_=application_masks(current,rectangles,False,self.app_profiles,resolved)
+                if masks!=rectangles:return False
+                if pixel_clients:
+                    import math
+                    import numpy as np
+                    current_image=capture.grab().image
+                    if current_image.shape!=image.shape:return False
+                    screen=(0,0,image.shape[1],image.shape[0])
+                    probe=None
+                    if probe_box is not None:
+                        x,y,width,height=probe_box
+                        left,top=math.floor(x),math.floor(y)
+                        probe=(left,top,math.ceil(x+width)-left,math.ceil(y+height)-top)
+                    for client in pixel_clients:
+                        clipped=intersect(client,screen)
+                        if clipped is None:return False
+                        parts=subtract(clipped,probe) if probe is not None else [clipped]
+                        for x,y,width,height in parts:
+                            if not np.array_equal(image[y:y+height,x:x+width],
+                                                  current_image[y:y+height,x:x+width]):return False
+                return True
             overlay.set_effect(parse_effect('遮挡'))
-            if not verify_exclusion(capture,overlay,rectangles):
+            if not verify_exclusion(capture,overlay,rectangles,scope_is_current):
                 raise RuntimeError('当前范围遮罩采集排除验证失败')
             if self.overlay is not overlay:return False
             self.exclusion_verified=True
             return True
+        except ProbeScopeChanged:
+            overlay.set_masks([],full=False,padding=0)
+            overlay.hide()
+            return False
         except Exception as error:
             self.error=str(error)
             overlay.hide()
@@ -314,7 +362,7 @@ class ControlPanel(QWidget):
                 self.region_status='等待桌面采集，尚未确认保护范围'
             # 所有运行路径只绘制已确认的应用/选区；失配和异常不扩展到整屏。
             full=False
-            if protecting and rectangles and not self.verify_range_capture(rectangles):rectangles=[]
+            if protecting and rectangles and not self.verify_range_capture(rectangles,windows):rectangles=[]
             if self.overlay is None:return  # 探针事件循环中用户可暂停/退出。
             self.protecting=protecting and bool(rectangles)
             self.overlay.set_masks(rectangles, full=False, image=self.latest.image if self.latest is not None else None, padding=0)

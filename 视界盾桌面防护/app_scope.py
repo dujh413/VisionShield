@@ -86,7 +86,7 @@ def profile_status(profiles, windows, resolved):
         candidates=[win for win in windows if win['key']==key and win['mode']!='ignore']
         bound=profile.get('binding')
         window=(next((win for win in candidates if win['handle']==bound['handle'] and win['pid']==bound['pid']),None)
-                if bound else candidates[0] if len(candidates)==1 else None)
+                if bound else candidates[0] if len(candidates)==1 and profile['mode']!='window' else None)
         if window is None:continue
         if profile['mode']=='window':available+=1
         elif profile['mode']=='tracked':
@@ -94,6 +94,8 @@ def profile_status(profiles, windows, resolved):
             if match and match['handle']==window['handle'] and match['rect'] is not None and intersect(match['rect'],window['rect']):
                 available+=1
     status=f'已定位{available}/{len(profiles)}个指定范围'
+    if any(profile['mode']=='window' and not profile.get('binding') for profile in profiles.values()):
+        status+='；整窗配置需暂停后重新点击目标窗口'
     if available<len(profiles):status+='；未定位的范围暂停遮蔽，请暂停后重新选择；不会扩大保护'
     return status
 
@@ -112,7 +114,7 @@ def application_masks(windows, rectangles, uncertain, profiles=None, resolved=No
             candidates=[win for win in windows if win['key']==window['key'] and win['mode']!='ignore']
             bound=profile.get('binding') if profile else None
             scope_valid=bool(profile and (bound and window.get('handle')==bound['handle'] and window.get('pid')==bound['pid']
-                                         or not bound and len(candidates)==1))
+                                         or not bound and profile['mode']!='window' and len(candidates)==1))
         if profile and mode != 'ignore':
             mode=profile['mode']
         scope=rect

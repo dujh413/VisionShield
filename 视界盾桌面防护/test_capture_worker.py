@@ -1,8 +1,8 @@
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock,patch
 import numpy as np
-from screen_capture import CaptureWorker,Frame
+from screen_capture import CaptureWorker,Frame,ScreenCapture
 
 
 class FakeCapture:
@@ -14,6 +14,29 @@ class FakeCapture:
 
 
 class CaptureTests(unittest.TestCase):
+    def test_capture_publishes_independent_owned_readonly_pixels(self):
+        pixels=np.full((3,4,4),120,np.uint8)
+        source=Mock(monitors=[{}, {'left':0,'top':0,'width':4,'height':3}])
+        source.grab.return_value=pixels
+        with patch('screen_capture.mss.mss',return_value=source):
+            capture=ScreenCapture()
+            try:
+                first=capture.grab()
+                self.assertEqual(first.image.shape,(3,4,3))
+                self.assertTrue(first.image.flags.owndata)
+                self.assertTrue(first.image.flags.c_contiguous)
+                self.assertFalse(first.image.flags.writeable)
+                self.assertIsNone(first.image.base)
+                with self.assertRaises(ValueError):first.image[0,0,0]=0
+                pixels[0,0,0]=99
+                second=capture.grab()
+                self.assertEqual(first.image[0,0,0],120)
+                self.assertEqual(second.image[0,0,0],99)
+                self.assertIsNot(first.image,second.image)
+                self.assertEqual((first.frame_id,second.frame_id),(1,2))
+            finally:capture.close()
+        source.close.assert_called_once()
+
     def test_slow_capture_does_not_block_consumer(self):
         with patch('screen_capture.ScreenCapture',FakeCapture):
             worker=CaptureWorker()

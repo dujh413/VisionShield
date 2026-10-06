@@ -1,12 +1,12 @@
 """窗口身份 + 控件结构 + 视觉特征；失败时不复用屏幕固定坐标。"""
 import time
 import hashlib
+import numpy as np
 from region_features import locate_features
 
 
 def client_signature(image, client):
     """Exact client-relative pixel digest; no pixels leave the caller's memory."""
-    import numpy as np
     if (not isinstance(image,np.ndarray) or image.ndim!=3 or image.shape[2]!=3
             or image.dtype!=np.uint8 or len(client)!=4):return None
     if any(type(value) is not int for value in client):return None
@@ -21,22 +21,30 @@ class RegionTracker:
         self.worker=None;self.results={};self.sequence=0;self.last_submit=0
         self.visual_cache={};self.binding={};self.profile_tokens={}
         self.last_image=None;self.image_sequence=0
+        self.signature_cache={}
 
     def close(self):
         if self.worker:self.worker.close();self.worker=None
         self.results.clear();self.visual_cache.clear();self.binding.clear()
+        self.signature_cache.clear()
         self.last_image=None
 
-    def resolve(self,profiles,windows,image,origin=(0,0),now=None):
+    def resolve(self,profiles,windows,image,origin=(0,0),now=None,asynchronous=True):
         now=time.monotonic() if now is None else now
         if image is not self.last_image:
             self.image_sequence+=1;self.last_image=image
+            self.signature_cache.clear()
+        # Captures are fresh owned readonly arrays. Mutable inputs and readonly
+        # views may change through an alias, so their pixels must be hashed again.
+        cacheable=(isinstance(image,np.ndarray) and image.ndim==3 and image.shape[2]==3
+                   and image.dtype==np.uint8 and image.flags.owndata and not image.flags.writeable)
+        if not cacheable:self.signature_cache.clear()
         active={key for key,profile in profiles.items() if profile['mode']=='tracked'}
-        for cache in (self.results,self.visual_cache,self.binding,self.profile_tokens):
+        for cache in (self.results,self.visual_cache,self.binding,self.profile_tokens,self.signature_cache):
             for key in list(cache):
                 if key not in active:cache.pop(key,None)
         resolved={};tasks={};clients={};signatures={}
-        if self.worker:
+        if self.worker and asynchronous:
             for item in self.worker.poll():
                 if 'error' in item:self.results.clear()
                 if 'regions' in item:
@@ -53,6 +61,7 @@ class RegionTracker:
             if self.profile_tokens.get(key)!=token:
                 self.profile_tokens[key]=token;self.binding.pop(key,None)
                 self.visual_cache.pop(key,None);self.results.pop(key,None)
+                self.signature_cache.pop(key,None)
             candidates=[w for w in windows if w['key']==key and w['mode']!='ignore']
             bound=profile.get('binding') or self.binding.get(key)
             if bound:
@@ -70,7 +79,14 @@ class RegionTracker:
                 except Exception:rect=None
                 if rect:method='native'
             elif anchor['type']=='uia':
-                digest=client_signature(image,window['client'])
+                client=tuple(window['client'])
+                memo=self.signature_cache.get(key) if cacheable else None
+                if memo is not None and memo[0]==client:
+                    digest=memo[1]
+                else:
+                    digest=client_signature(image,window['client'])
+                    self.signature_cache.pop(key,None)
+                    if cacheable and digest is not None:self.signature_cache[key]=(client,digest)
                 signature={'layout':digest,'size':tuple(window['client'][2:]),
                            'handle':window['handle'],'pid':window['pid'],
                            'profile':hashlib.blake2b(token.encode('utf-8'),digest_size=16).hexdigest()}
@@ -96,7 +112,7 @@ class RegionTracker:
                 from app_scope import intersect
                 rect=intersect(rect,window['rect'])
             resolved[key]={'handle':window['handle'],'rect':rect,'method':method}
-        if tasks:
+        if tasks and asynchronous:
             if self.worker is None and now>=self.last_submit:
                 from region_worker import RegionWorker
                 self.worker=RegionWorker()

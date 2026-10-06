@@ -249,6 +249,18 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(json.loads(reopened.value('app_profiles')), {})
         self.assertEqual(self.panel.load_profiles(),{})
 
+    def test_restart_requires_whole_window_reselection_but_session_binding_is_kept(self):
+        profile={'app':{'mode':'window','binding':{'handle':1,'pid':10}}}
+        self.panel.save_profiles(profile)
+        self.assertEqual(self.panel.load_profiles(),profile)
+        self.assertNotIn('重启后需',self.panel.scope_summary.text())
+        reopened=Shell(QSettings(self.path,QSettings.IniFormat),FakeBackend(),tray_available=False)
+        try:
+            self.assertEqual(reopened.load_profiles(),{'app':{'mode':'window'}})
+            self.assertIn('软件重启后需',reopened.scope_summary.text())
+        finally:
+            reopened.hide();reopened.deleteLater();self.app.processEvents()
+
     def test_reselecting_same_application_replaces_previous_scope(self):
         self.panel.save_profiles({'app':{'mode':'tracked','anchor':{'type':'visual'}}})
         picker=Mock()
