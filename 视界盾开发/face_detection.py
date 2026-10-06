@@ -16,6 +16,16 @@ def map_faces(faces, scale, origin=(0, 0)):
     return mapped
 
 
+def unmirror_faces(faces, width):
+    """镜像检测映回原画面；交换双眼和嘴角以保持SFace五点顺序。"""
+    mapped=map_faces(faces,1)
+    mapped[:,0]=width-mapped[:,0]-mapped[:,2]
+    points=mapped[:,4:14].reshape(-1,5,2)
+    points[:,:,0]=width-1-points[:,:,0]
+    mapped[:,4:14]=points[:,[1,0,2,4,3],:].reshape(-1,10)
+    return mapped
+
+
 def merge_faces(candidates, image_size, confidence=.6, full_count=0):
     """去除整帧/分区对同一张脸的重复检测，保留相邻的真实小脸。"""
     width, height = image_size
@@ -48,7 +58,15 @@ def merge_faces(candidates, image_size, confidence=.6, full_count=0):
             nested_roi=(not is_full and previous_full and .25 <= w*h/(c*d) <= .75
                         and intersection/(w*h) >= .95
                         and abs(x+w/2-a-c/2) < c*.25 and abs(y+h/2-b-d/2) < d*.25)
-            if nested_roi or same_landmarks or (similar_size and near_center and (iou >= .35 or intersection/max(min(w*h, c*d), 1e-9) >= .75)):
+            # A partition can trim one side of the same face just outside its
+            # full-frame box. Three matching landmarks on that side provide
+            # stronger evidence than merely relaxing box containment.
+            partial_roi=(not is_full and previous_full and .25 <= w*h/(c*d) <= .75
+                         and intersection/(w*h) >= .9
+                         and abs(x+w/2-a-c/2) < c*.25 and abs(y+h/2-b-d/2) < d*.25
+                         and (np.all(landmark_distance[[0,2,3]] < min(w,c)*.12)
+                              or np.all(landmark_distance[[1,2,4]] < min(w,c)*.12)))
+            if nested_roi or partial_roi or same_landmarks or (similar_size and near_center and (iou >= .35 or intersection/max(min(w*h, c*d), 1e-9) >= .75)):
                 duplicate = True
                 break
         if not duplicate:
@@ -59,7 +77,7 @@ def merge_faces(candidates, image_size, confidence=.6, full_count=0):
 
 class FaceScanner:
     """整帧＋两块轮转分区；小脸候选优先在局部图像中重新检测。"""
-    def __init__(self, detector, detail_interval=.1, max_edge=960, diagnostics=False, focus_tile_count=1):
+    def __init__(self, detector, detail_interval=.1, max_edge=960, diagnostics=False, focus_tile_count=1, mirror_scan=False):
         if focus_tile_count not in (1,2):
             raise ValueError('focus_tile_count must be 1 or 2')
         self.detector = detector
@@ -68,9 +86,12 @@ class FaceScanner:
         self.last_detail_at = None
         self.last_metrics = {}
         self.weak_candidates = []
+        self.previous_confirmed = []
         self.current_unconfirmed_count = 0
         self.tile_index = 0
         self.focus_tile_count = focus_tile_count
+        self.mirror_scan = mirror_scan
+        self.mirror_turn = 0
         self.focus = None
         self.focus_misses = 0
         self.diagnostics = diagnostics
@@ -79,6 +100,13 @@ class FaceScanner:
     def _confirm_candidates(self, faces, now):
         self.current_unconfirmed_count = 0
         pending = [item for item in self.weak_candidates if 0 <= now-item['at'] <= .95]
+        # Strong observations provide spatial evidence for a weaker next frame.
+        # Consolidate with weak history so each prior face can be used only once.
+        for item in self.previous_confirmed:
+            if not 0 <= now-item['at'] <= .95:continue
+            old=next((p for p in pending if self._same_candidate(item['face'],p['face'])),None)
+            if old is None:pending.append(dict(item,hits=1))
+            elif item['at'] >= old['at']:old.update(face=item['face'],at=item['at'])
         accepted, seen = [], set()
         for face in faces:
             if face[14] >= .78:
@@ -92,10 +120,7 @@ class FaceScanner:
             match=None
             for index,item in enumerate(pending):
                 if index in seen or now-item['at'] < .025:continue
-                a,b,c,d=map(float,item['face'][:4])
-                if (min(w/c,c/w,h/d,d/h) >= .65
-                        and abs(x+w/2-a-c/2) < min(w,c)*.5
-                        and abs(y+h/2-b-d/2) < min(h,d)*.5):
+                if self._same_candidate(face,item['face']):
                     match=index
                     break
             if match is None:
@@ -107,8 +132,16 @@ class FaceScanner:
                 item.update(face=face,at=now,hits=item['hits']+1)
                 if item['hits'] >= 2:accepted.append(face)
         # 只保存少量几何候选，不保留任何原图或人物特征。
-        self.weak_candidates=sorted(pending,key=lambda item:item['at'],reverse=True)[:16]
+        self.weak_candidates=sorted((p for p in pending if p['face'][14] < .78),key=lambda item:item['at'],reverse=True)[:16]
+        self.previous_confirmed=[{'face':face.copy(),'at':now} for face in accepted if face[14] >= .78][:16]
         return accepted
+
+    @staticmethod
+    def _same_candidate(first,second):
+        x,y,w,h=map(float,first[:4]);a,b,c,d=map(float,second[:4])
+        return (min(w/c,c/w,h/d,d/h) >= .65
+                and abs(x+w/2-a-c/2) < min(w,c)*.5
+                and abs(y+h/2-b-d/2) < min(h,d)*.5)
 
     def _detect(self, image, origin=(0, 0), enlarge=False, max_edge=None, frame_size=None, label='full'):
         height, width = image.shape[:2]
@@ -187,6 +220,13 @@ class FaceScanner:
         detailed = self.last_detail_at is None or now-self.last_detail_at >= self.detail_interval
         focus_attempted=False
         if detailed:
+            # Alternate enhancement with the normal path so frequent camera
+            # observations are not all delayed by the larger full-frame pass.
+            if self.mirror_scan and self.mirror_turn%2==0:
+                enhanced=cv2.flip(self._contrast(image),1)
+                rows=self._detect(enhanced,enlarge=True,max_edge=min(1920,max(width,height)*1.5),label='background_mirror')
+                faces.extend(unmirror_faces(rows,width))
+            self.mirror_turn+=1
             count=2
             if self.focus is not None and 0 <= now-self.focus['at'] <= .95:
                 crop,origin=self._focus_crop(image)

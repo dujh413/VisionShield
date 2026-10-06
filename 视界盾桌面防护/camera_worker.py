@@ -63,7 +63,8 @@ def camera_main(root, stop, outputs, preview=False, diagnostics=False, template_
         # 主循环已限频且只读新帧；不因设备时钟的约100ms抖动跳过背景分区。
         # 加速引擎保留每帧两块背景扫描，避免弱局部候选拖慢其余身后区域。
         scanner = FaceScanner(detector,detail_interval=0,diagnostics=diagnostics,
-                              focus_tile_count=2 if getattr(detector,'backend',None)=='onnxruntime-cpu' else 1)
+                              focus_tile_count=2 if getattr(detector,'backend',None)=='onnxruntime-cpu' else 1,
+                              mirror_scan=getattr(detector,'backend',None)=='onnxruntime-cpu')
         bystander = BystanderHold()
         journal=StrangerJournal()
         camera = open_camera(0, 'auto', resolution=(1280, 720))

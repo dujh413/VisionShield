@@ -77,8 +77,9 @@ class ScopePickerTests(unittest.TestCase):
     def picker(self,whole=False):
         window={'mode':'lines','rect':(100,120,600,420),'client':(105,125,590,400),
                 'key':'fake-app','handle':321,'pid':123}
-        with patch('app_scope.window_inventory',return_value=[window]):
-            return ScopePicker(whole)
+        inventory=patch('app_scope.window_inventory',return_value=[window])
+        inventory.start();self.addCleanup(inventory.stop)
+        return ScopePicker(whole)
 
     def test_whole_window_selection_binds_actual_window_and_process(self):
         picker=self.picker(True);picker.show()
