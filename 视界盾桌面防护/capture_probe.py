@@ -6,13 +6,24 @@ from PySide6.QtCore import QEventLoop, QTimer, Qt
 from PySide6.QtWidgets import QApplication, QWidget
 
 
-def settle():
+class ProbeScopeChanged(RuntimeError):
+    """The requested scope changed while the native exclusion probe settled."""
+
+
+def settle(check_scope=None):
     loop = QEventLoop()
+    timer = QTimer()
+    if check_scope is not None:
+        timer.timeout.connect(lambda: loop.quit() if not check_scope() else None)
+        timer.start(20)
     QTimer.singleShot(350, loop.quit)
-    loop.exec()
+    try:
+        loop.exec()
+    finally:
+        timer.stop()
 
 
-def verify_exclusion(capture, overlay, rectangles=None):
+def verify_exclusion(capture, overlay, rectangles=None, scope_is_current=None):
     screen = QApplication.primaryScreen()
     geo = screen.geometry()
     ratio = screen.devicePixelRatio()
@@ -33,13 +44,30 @@ def verify_exclusion(capture, overlay, rectangles=None):
     background.setStyleSheet('background-color: rgb(0,255,255);')
     background.setGeometry(geo.x()+left,geo.y()+top,4,4)
     box=(left*ratio,top*ratio,4*ratio,4*ratio)
+    scope_changed=False
+    def check_scope():
+        nonlocal scope_changed
+        if scope_changed:return False
+        try:
+            valid=(scope_is_current is None or scope_is_current(
+                box if background.isVisible() else None,int(background.winId())))
+        except Exception:
+            valid=False
+        if not valid:
+            scope_changed=True
+            overlay.set_masks([],full=False,padding=0)
+            overlay.hide()
+            background.hide()
+        return valid
     try:
+        if not check_scope():raise ProbeScopeChanged('保护范围已变化，请重试')
         # 风险已发生：验证期间也保持全部已确认范围被保护，不能只盖探针。
         overlay.set_masks(candidates, full=False, padding=0)
         overlay.show()
         background.show()
         overlay.raise_()
-        settle()
+        settle(check_scope if scope_is_current is not None else None)
+        if not check_scope():raise ProbeScopeChanged('保护范围已变化，请重试')
         x, y = int(box[0]+box[2]/2)-1, int(box[1]+box[3]/2)-1
         before = capture.grab().image[y:y+2, x:x+2]
         if before.shape != (2,2,3) or not np.all(before == [255,255,0]):

@@ -1,5 +1,5 @@
 import unittest
-from app_scope import application_masks, stored_profiles
+from app_scope import application_masks, profile_status, stored_profiles
 
 
 def window(handle, key='demo', rect=(100, 100, 500, 400), mode='lines'):
@@ -28,10 +28,17 @@ class SelectedScopeTests(unittest.TestCase):
         self.assertEqual(application_masks([selected,second],[],True,profile,{}),([selected['rect']],False))
         self.assertEqual(application_masks([second],[],True,profile,{}),([],False))
 
-    def test_restarted_whole_window_profile_requires_a_unique_candidate(self):
+    def test_restarted_whole_window_profile_never_adopts_another_window(self):
         profile=stored_profiles({'demo':{'mode':'window','binding':{'handle':1,'pid':10}}})
         self.assertEqual(profile,{'demo':{'mode':'window'}})
+        self.assertEqual(application_masks([window(1)],[],True,profile,{}),([],False))
         self.assertEqual(application_masks([window(1),window(2)],[],True,profile,{}),([],False))
+        self.assertEqual(application_masks([window(2)],[],True,profile,{}),([],False))
+        self.assertIn('整窗配置需暂停后重新点击',profile_status(profile,[window(2)],{}))
+
+    def test_no_selected_scope_preserves_automatic_application_protection(self):
+        automatic=window(1,mode='window')
+        self.assertEqual(application_masks([automatic],[],True,{},{}),([automatic['rect']],False))
 
     def test_own_ui_is_clear_even_when_z_order_metadata_places_it_last(self):
         target=window(1)

@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 import numpy as np
 from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QTimer
 from desktop_guard import ControlPanel
 from screen_capture import Frame
 from protection_state import ProtectionState
@@ -131,6 +132,71 @@ class ControlSafetyTests(unittest.TestCase):
         self.assertFalse(self.panel.probe_active)
         self.assertFalse(self.panel.exclusion_verified)
         capture.close.assert_called_once()
+
+    def test_probe_cancels_on_window_move_frontend_overlap_or_window_loss(self):
+        original={'key':'test','handle':1,'pid':1,'mode':'lines',
+                  'rect':(0,0,64,64),'client':(0,0,64,64)}
+        changes=([dict(original,rect=(100,0,64,64),client=(100,0,64,64))],
+                 [dict(original),{'key':'own','handle':2,'pid':2,'mode':'ignore','own_ui':True,
+                                  'rect':(0,0,30,30),'client':(0,0,30,30)}],[])
+        for changed in changes:
+            with self.subTest(windows=changed):
+                p=self.panel;p.exclusion_verified=False;p.error=None;p.overlay=Mock()
+                p.app_profiles={'test':{'mode':'window','binding':{'handle':1,'pid':1}}}
+                p.region_tracker=Mock();p.region_tracker.resolve.return_value={}
+                inventory=[dict(original)];capture=Mock()
+                capture.grab.return_value=type('Frame',(),{'image':np.full((1000,1000,3),[255,255,0],dtype=np.uint8)})()
+                QTimer.singleShot(40,lambda changed=changed:inventory.__setitem__(slice(None),changed))
+                with patch('desktop_guard.ScreenCapture',return_value=capture), \
+                        patch('app_scope.window_inventory',side_effect=lambda monitor:list(inventory)):
+                    self.assertFalse(p.verify_range_capture([(0,0,64,64)],list(inventory)))
+                self.assertIsNone(p.error)
+                self.assertFalse(p.exclusion_verified)
+                self.assertEqual(p.overlay.set_masks.call_args.args[0],[])
+                capture.grab.assert_not_called();capture.close.assert_called_once()
+
+    def test_probe_cancels_on_internal_native_anchor_move(self):
+        p=self.panel;p.exclusion_verified=False;p.error=None
+        p.app_profiles={'test':{'mode':'tracked','binding':{'handle':1,'pid':1},
+            'anchor':{'type':'native','class':'Pane','id':12,'fraction':[0,0,1,1]}}}
+        resolved={'test':{'handle':1,'rect':(0,0,30,30)}}
+        p.region_tracker=Mock();p.region_tracker.resolve.side_effect=lambda *args,**kwargs:resolved
+        capture=Mock()
+        QTimer.singleShot(40,lambda:resolved['test'].__setitem__('rect',(30,30,30,30)))
+        with patch('desktop_guard.ScreenCapture',return_value=capture):
+            self.assertFalse(p.verify_range_capture([(0,0,30,30)]))
+        self.assertIsNone(p.error);self.assertFalse(p.exclusion_verified)
+        self.assertEqual(p.overlay.set_masks.call_args.args[0],[])
+        capture.grab.assert_not_called();capture.close.assert_called_once()
+
+    def test_irrelevant_background_z_order_change_still_allows_native_verification(self):
+        p=self.panel;p.exclusion_verified=False;p.error=None
+        p.app_profiles={'test':{'mode':'window','binding':{'handle':1,'pid':1}}}
+        p.region_tracker=Mock();p.region_tracker.resolve.return_value={}
+        target={'key':'test','handle':1,'pid':1,'mode':'lines','rect':(0,0,64,64),'client':(0,0,64,64)}
+        tray={'key':'tray','handle':2,'pid':2,'mode':'ignore','rect':(0,100,64,10),'client':(0,100,64,10)}
+        inventory=[tray,target];capture=Mock()
+        capture.grab.return_value=type('Frame',(),{'image':np.full((1000,1000,3),[255,255,0],dtype=np.uint8)})()
+        QTimer.singleShot(40,inventory.reverse)
+        with patch('desktop_guard.ScreenCapture',return_value=capture), \
+                patch('app_scope.window_inventory',side_effect=lambda monitor:list(inventory)):
+            self.assertTrue(p.verify_range_capture([(0,0,64,64)],list(inventory)))
+        self.assertTrue(p.exclusion_verified);self.assertIsNone(p.error)
+        capture.grab.assert_called_once();capture.close.assert_called_once()
+
+    def test_probe_cancels_on_uia_client_change_without_reusing_cached_rect(self):
+        p=self.panel;p.exclusion_verified=False;p.error=None
+        p.app_profiles={'test':{'mode':'tracked','binding':{'handle':1,'pid':1},
+            'anchor':{'type':'uia','path':[{'kind':1,'class':'Pane','id':'pane'}],'fraction':[0,0,1,1]}}}
+        p.region_tracker=Mock();p.region_tracker.resolve.return_value={'test':{'handle':1,'rect':(0,0,30,30)}}
+        capture=Mock();image=p.latest.image.copy()
+        capture.grab.side_effect=lambda:type('Frame',(),{'image':image.copy()})()
+        QTimer.singleShot(40,lambda:image.__setitem__((slice(20,25),slice(20,25)),255))
+        with patch('desktop_guard.ScreenCapture',return_value=capture):
+            self.assertFalse(p.verify_range_capture([(0,0,30,30)]))
+        self.assertIsNone(p.error);self.assertFalse(p.exclusion_verified)
+        self.assertEqual(p.overlay.set_masks.call_args.args[0],[])
+        self.assertGreater(capture.grab.call_count,1);capture.close.assert_called_once()
 
     def test_owner_pose_or_missing_face_does_not_emit_stranger_alert(self):
         self.panel.camera.risk.return_value=(True,'机主未确认')
