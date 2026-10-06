@@ -53,6 +53,7 @@ class ContentTests(unittest.TestCase):
         view = self.state.view(120.)
         self.assertTrue(view['full'])
         self.assertTrue(view['capture_failed'])
+        self.assertTrue(view['result_expired'])
         self.assertFalse(view['coordinates_valid'])
 
     def test_partial_unknown_region_covers_entire_sensitive_line(self):
@@ -65,13 +66,43 @@ class ContentTests(unittest.TestCase):
     def test_result_ttl_expires_even_with_fresh_capture(self):
         self.state.accept(self.result(), 0.)
         self.state.observe(SimpleNamespace(image=self.image.copy(), frame_id=100, captured_at=11.))
-        self.assertFalse(self.state.view(11.)['coordinates_valid'])
+        view = self.state.view(11.)
+        self.assertFalse(view['coordinates_valid'])
+        self.assertTrue(view['result_expired'])
+        self.assertFalse(view['capture_failed'])
+
+    def test_pending_first_result_is_not_expired(self):
+        view = self.state.view(0.)
+        self.assertTrue(view['full'])
+        self.assertFalse(view['result_expired'])
+        self.assertFalse(view['capture_failed'])
+        self.assertFalse(ContentState().view(0.)['result_expired'])
+
+    def test_future_cached_result_is_expired_even_with_fresh_capture(self):
+        self.state.accept(self.result(), 0.)
+        self.state.observe(SimpleNamespace(image=self.image.copy(), frame_id=2, captured_at=-.1))
+        view = self.state.view(-.1)
+        self.assertTrue(view['full'])
+        self.assertTrue(view['result_expired'])
+        self.assertFalse(view['coordinates_valid'])
+        self.assertFalse(view['capture_failed'])
 
     def test_empty_result_is_unknown(self):
         self.state.accept(self.result([]), 0.)
         view = self.state.view(0.)
         self.assertTrue(view['full'])
         self.assertFalse(view['coverage_complete'])
+        self.assertFalse(view['result_expired'])
+
+    def test_large_content_change_is_unknown_without_expiring_fresh_result(self):
+        self.state.accept(self.result(), 0.)
+        changed = np.full_like(self.image, 255)
+        self.state.observe(SimpleNamespace(image=changed, frame_id=2, captured_at=.1))
+        view = self.state.view(.1)
+        self.assertTrue(view['full'])
+        self.assertFalse(view['coordinates_valid'])
+        self.assertFalse(view['coverage_complete'])
+        self.assertFalse(view['result_expired'])
 
     def test_stale_future_and_out_of_order_results_are_rejected(self):
         self.assertFalse(self.state.accept(self.result(captured_at=1.), 0.))

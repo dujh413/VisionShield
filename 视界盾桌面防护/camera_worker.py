@@ -37,6 +37,20 @@ class StrangerJournal:
                 'last_stranger_observed_at':self.observed_at}
 
 
+class ProtectionJournal:
+    """最新状态携带全部身份风险，丢旧帧不能遗漏候选人脸或未确认观察。"""
+    def __init__(self):
+        self.sequence=0
+        self.observed_at=None
+
+    def record(self, sequence, observed_at, risk):
+        if risk:
+            self.sequence=sequence
+            self.observed_at=observed_at
+        return {'last_risk_sequence':self.sequence,
+                'last_risk_observed_at':self.observed_at}
+
+
 def camera_main(root, stop, outputs, preview=False, diagnostics=False, template_path=None):
     camera = None
     reader = None
@@ -67,6 +81,7 @@ def camera_main(root, stop, outputs, preview=False, diagnostics=False, template_
                               mirror_scan=getattr(detector,'backend',None)=='onnxruntime-cpu')
         bystander = BystanderHold()
         journal=StrangerJournal()
+        protection_journal=ProtectionJournal()
         camera = open_camera(0, 'auto', resolution=(1280, 720))
         reader = LatestCameraFrame(camera)
         sequence = 0
@@ -107,12 +122,14 @@ def camera_main(root, stop, outputs, preview=False, diagnostics=False, template_
             if templates is not None and bystander.update(observed_at, identity['stranger_detected']):
                 identity.update(stranger_detected=True, protect_request=True,
                                 owner_session_active=False, pose_grace=False)
+            protection_event=protection_journal.record(sequence+1,observed_at,
+                identity['protect_request'] or identity['stranger_detected'])
             sequence += 1
             published_at = time.monotonic()
             item = {'sequence':sequence, 'observed_at':observed_at,
                        **identity, 'faces_count':len(faces),
                        'enrolled':templates is not None, 'candidate_pending':candidate_pending,
-                       **scanner.last_metrics, **event,
+                       **scanner.last_metrics, **event, **protection_event,
                        'frame_age_ms':round((published_at-reader.last_consumed_at)*1000,2),
                        'processing_ms':round((published_at-before)*1000,2),
                        'face_sizes':[[round(float(f[2])),round(float(f[3]))] for f in faces],
@@ -149,6 +166,8 @@ class CameraWorker:
         self.last, self.error = None, None
         self.last_stranger_sequence=0
         self.new_stranger_event=False
+        self.last_risk_sequence=0
+        self.new_protection_event=False
 
     def accept_status(self, item):
         """不让排队/丢旧状态消掉真实风险事件，拒绝倒序或无效状态。"""
@@ -166,6 +185,30 @@ class CameraWorker:
             return False
         if self.last and (sequence<=self.last['sequence'] or observed_at<=self.last['observed_at']):
             return False
+        complete_risk_history=('last_risk_sequence' in item and 'last_risk_observed_at' in item)
+        if (('last_risk_sequence' in item) != ('last_risk_observed_at' in item)
+                or self.last and 'last_risk_sequence' in self.last and not complete_risk_history):
+            self.error='Invalid camera risk history'
+            return False
+        if complete_risk_history:
+            risk_marker=item['last_risk_sequence'];risk_at=item['last_risk_observed_at']
+            previous_risk_at=self.last.get('last_risk_observed_at') if self.last else None
+            if (type(risk_marker) is not int or not 0<=risk_marker<=sequence
+                    or (risk_marker == 0 and risk_at is not None)
+                    or (risk_marker and (type(risk_at) not in (int,float)
+                        or not isfinite(risk_at) or risk_at>observed_at))
+                    or risk_marker<self.last_risk_sequence
+                    or (self.last and 'last_risk_sequence' in self.last
+                        and risk_marker==self.last_risk_sequence and risk_at!=previous_risk_at)
+                    or (risk_marker>self.last_risk_sequence and previous_risk_at is not None
+                        and risk_at<=previous_risk_at)
+                    or ((item['protect_request'] or item['stranger_detected'])
+                        and (risk_marker!=sequence or risk_at!=observed_at))):
+                self.error='Invalid camera risk history'
+                return False
+            if risk_marker>self.last_risk_sequence:
+                self.last_risk_sequence=risk_marker
+                self.new_protection_event=True
         if marker>self.last_stranger_sequence:
             self.last_stranger_sequence=marker
             self.new_stranger_event=True
@@ -174,6 +217,7 @@ class CameraWorker:
 
     def poll(self):
         self.new_stranger_event=False
+        self.new_protection_event=False
         while True:
             try:
                 item = self.outputs.get_nowait()
@@ -197,6 +241,8 @@ class CameraWorker:
             return True, '请先在设置中登记机主'
         if self.new_stranger_event:
             return True, '近期检测到旁人，等待连续安全观察后恢复'
+        if self.new_protection_event:
+            return True, '近期身份观察存在风险，等待连续安全观察后恢复'
         risk = self.last['protect_request'] or self.last['stranger_detected']
         reason = ('检测到陌生人或旁人' if self.last.get('stranger_detected') else
                   '候选人脸待确认，暂时保护' if self.last.get('candidate_pending') else

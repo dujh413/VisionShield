@@ -106,18 +106,24 @@ class ContentState:
         self.full_unknown = area_ratio(self.unknown, self.latest.image) >= .6 or len(self.unknown) > 32
 
     def view(self, now):
+        # Pending or changed content is distinct from an expired OCR result;
+        # only the latter is an analysis freshness failure.
+        result_expired = (self.result is not None
+                          and not 0 <= now - self.result['captured_at'] <= self.result_timeout)
         if self.latest is None or not 0 <= now - self.latest.captured_at <= self.capture_timeout:
             return {'full': True, 'rectangles': [], 'hits': [], 'coordinates_valid': False,
-                    'coverage_complete': False, 'reason': '采集未就绪或已超时', 'capture_failed': True}
-        if self.result is None or not 0 <= now - self.result['captured_at'] <= self.result_timeout:
+                    'coverage_complete': False, 'reason': '采集未就绪或已超时', 'capture_failed': True,
+                    'result_expired': result_expired}
+        if self.result is None or result_expired:
             return {'full': True, 'rectangles': [], 'hits': [], 'coordinates_valid': False,
-                    'coverage_complete': False, 'reason': '文字分析未完成或结果已过期', 'capture_failed': False}
+                    'coverage_complete': False, 'reason': '文字分析未完成或结果已过期', 'capture_failed': False,
+                    'result_expired': result_expired}
         return {'full': self.full_unknown,
                 'rectangles': [rect_of(h['polygon']) for h in self.hits] + rectangles(self.unknown),
                 'hits': self.hits, 'coordinates_valid': not self.full_unknown,
                 'coverage_complete': not self.unknown, 'unknown_regions': len(self.unknown),
                 'valid_lines': self.valid_lines, 'reason': '变化区域临时保护' if self.unknown else '文字区域已分析',
-                'capture_failed': False}
+                'capture_failed': False, 'result_expired': result_expired}
 
     def should_submit(self, now):
         if self.latest is None or not 0 <= now - self.latest.captured_at <= self.capture_timeout:

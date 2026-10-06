@@ -9,13 +9,18 @@ import numpy as np
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'视界盾开发'))
 
-from camera_worker import CameraWorker, StrangerJournal, camera_main
+from camera_worker import CameraWorker, ProtectionJournal, StrangerJournal, camera_main
 
 
 def packet(sequence, stamp, event=0, event_at=None, stranger=False):
     return {'sequence':sequence,'observed_at':stamp,'enrolled':True,
             'protect_request':stranger,'stranger_detected':stranger,
             'last_stranger_sequence':event,'last_stranger_observed_at':event_at}
+
+
+def protected_packet(sequence, stamp, risk_event=0, risk_at=None, risk=False, **details):
+    return {**packet(sequence,stamp),'last_risk_sequence':risk_event,
+            'last_risk_observed_at':risk_at,'protect_request':risk,**details}
 
 
 class CameraEventTests(unittest.TestCase):
@@ -26,6 +31,8 @@ class CameraEventTests(unittest.TestCase):
         worker.last=worker.error=None
         worker.last_stranger_sequence=0
         worker.new_stranger_event=False
+        worker.last_risk_sequence=0
+        worker.new_protection_event=False
         return worker
 
     def test_journal_retains_real_observation_without_refreshing_from_hold(self):
@@ -35,6 +42,93 @@ class CameraEventTests(unittest.TestCase):
         self.assertEqual(journal.record(3,10.4,False),first)
         self.assertEqual(journal.record(4,10.6,False),first)
         self.assertEqual(journal.record(5,10.8,True)['last_stranger_sequence'],5)
+
+    def test_protection_journal_retains_every_risk_observation_until_next_risk(self):
+        journal=ProtectionJournal()
+        self.assertEqual(journal.record(1,10,False),
+            {'last_risk_sequence':0,'last_risk_observed_at':None})
+        first=journal.record(2,10.2,True)
+        self.assertEqual(first,{'last_risk_sequence':2,'last_risk_observed_at':10.2})
+        self.assertEqual(journal.record(4,10.6,False),first)
+        self.assertEqual(journal.record(5,10.8,True)['last_risk_sequence'],5)
+
+    def test_latest_safe_packet_carries_dropped_candidate_and_unconfirmed_risk(self):
+        for details in ({'candidate_pending':True},{'owner_verified':False}):
+            with self.subTest(details=details):
+                journal=ProtectionJournal()
+                dropped={**protected_packet(2,10.2,risk=True,**details),
+                         **journal.record(2,10.2,True)}
+                self.assertTrue(dropped['protect_request'])
+                worker=self.worker()
+                worker.outputs.put({**protected_packet(4,10.6),**journal.record(4,10.6,False)})
+                worker.poll()
+                self.assertTrue(worker.new_protection_event)
+                self.assertFalse(worker.new_stranger_event)
+                self.assertEqual(worker.risk(10.7),
+                    (True,'近期身份观察存在风险，等待连续安全观察后恢复'))
+                worker.poll()
+                self.assertFalse(worker.new_protection_event)
+                self.assertFalse(worker.risk(10.8)[0])
+                worker.outputs.put(protected_packet(5,10.9,2,10.2))
+                worker.poll()
+                self.assertFalse(worker.new_protection_event)
+
+    def test_draining_risky_then_safe_packets_keeps_protection_event_for_poll(self):
+        worker=self.worker()
+        worker.outputs.put(protected_packet(2,10.2,2,10.2,risk=True,candidate_pending=True))
+        worker.outputs.put(protected_packet(3,10.4,2,10.2))
+        worker.poll()
+        self.assertEqual(worker.last['sequence'],3)
+        self.assertTrue(worker.new_protection_event)
+        self.assertTrue(worker.risk(10.5)[0])
+
+    def test_stranger_event_remains_the_reason_when_both_journals_advance(self):
+        worker=self.worker()
+        worker.outputs.put(protected_packet(4,10.6,3,10.4,
+            last_stranger_sequence=2,last_stranger_observed_at=10.2))
+        worker.poll()
+        self.assertTrue(worker.new_protection_event)
+        self.assertTrue(worker.new_stranger_event)
+        self.assertEqual(worker.risk(10.7),
+            (True,'近期检测到旁人，等待连续安全观察后恢复'))
+
+    def test_old_packets_remain_compatible_without_claiming_complete_history(self):
+        worker=self.worker()
+        self.assertTrue(worker.accept_status(packet(1,10)))
+        self.assertTrue(worker.accept_status(packet(3,10.4)))
+        self.assertNotIn('last_risk_sequence',worker.last)
+        self.assertFalse(worker.new_protection_event)
+        self.assertFalse(worker.risk(10.5)[0])
+        self.assertTrue(worker.accept_status(protected_packet(4,10.6)))
+        self.assertFalse(worker.accept_status(packet(5,10.8)))
+        self.assertEqual(worker.last['sequence'],4)
+        self.assertTrue(worker.risk(10.9)[0])
+
+    def test_incomplete_or_invalid_risk_history_fails_closed(self):
+        invalid=(
+            {**packet(1,10),'last_risk_sequence':0},
+            {**packet(1,10),'last_risk_observed_at':None},
+            protected_packet(1,10,True,10),protected_packet(1,10,-1,10),
+            protected_packet(1,10,2,10),protected_packet(1,10,0,10),
+            protected_packet(1,10,1,None),protected_packet(1,10,1,float('nan')),
+            protected_packet(1,10,1,float('inf')),protected_packet(1,10,1,True),
+            protected_packet(1,10,1,11),protected_packet(1,10,risk=True))
+        for status in invalid:
+            with self.subTest(status=status):
+                worker=self.worker()
+                self.assertFalse(worker.accept_status(status))
+                self.assertTrue(worker.risk(10)[0])
+
+    def test_risk_history_watermark_or_timestamp_cannot_be_rewritten(self):
+        for status in (protected_packet(5,10.8),protected_packet(5,10.8,2,10.1),
+                       protected_packet(5,10.8,3,10.1),protected_packet(5,10.8,3,10.2)):
+            with self.subTest(status=status):
+                worker=self.worker()
+                self.assertTrue(worker.accept_status(protected_packet(4,10.6,2,10.2)))
+                self.assertFalse(worker.accept_status(status))
+                self.assertEqual(worker.last['sequence'],4)
+                self.assertEqual(worker.last_risk_sequence,2)
+                self.assertTrue(worker.risk(10.9)[0])
 
     def test_latest_safe_packet_carries_dropped_stranger_event_and_consumes_once(self):
         worker=self.worker()
@@ -138,9 +232,50 @@ class CameraEventTests(unittest.TestCase):
         self.assertTrue(status['owner_verified'])
         self.assertFalse(status['stranger_detected'])
         self.assertEqual(status['last_stranger_sequence'],0)
+        self.assertEqual(status['last_risk_sequence'],1)
+        self.assertEqual(status['last_risk_observed_at'],11.3)
         worker=self.worker();worker.accept_status(status)
         self.assertFalse(worker.new_stranger_event)
-        self.assertEqual(worker.risk(11.6),(True,'候选人脸待确认，暂时保护'))
+        self.assertTrue(worker.new_protection_event)
+        self.assertEqual(worker.risk(11.6),
+            (True,'近期身份观察存在风险，等待连续安全观察后恢复'))
+        reader.close.assert_called_once()
+
+    def test_bystander_hold_is_recorded_after_raw_identity_is_safe(self):
+        stop=Mock();stop.is_set.side_effect=[False,True]
+        reader=Mock(last_consumed_at=11.3)
+        reader.read.return_value=(True,np.zeros((72,128,3),np.uint8))
+        scanner=Mock(last_metrics={},current_unconfirmed_count=0);scanner.detect.return_value=[]
+        tracker=Mock();tracker.update.return_value=[]
+        presence=Mock();presence.update.return_value={
+            'owner_verified':True,'owner_session_active':True,'pose_grace':False,
+            'stranger_detected':False,'protect_request':False}
+        hold=Mock();hold.update.return_value=True
+        with patch('identity_test.load_models',return_value=(Mock(),Mock())), \
+             patch('camera_test.open_camera'), \
+             patch('camera_test.LatestCameraFrame',return_value=reader), \
+             patch('face_detection.FaceScanner',return_value=scanner), \
+             patch('face_detection.BystanderHold',return_value=hold), \
+             patch('owner_tracking.ShortTracker',return_value=tracker), \
+             patch('owner_presence.OwnerPresence',return_value=presence), \
+             patch('ocr_worker.put_latest') as publish, \
+             patch('camera_worker.owner_file') as owner_path, \
+             patch('numpy.load') as template, \
+             patch('camera_worker.time.monotonic',side_effect=[10,11,11.5,11.6]):
+            owner_path.return_value.exists.return_value=True
+            template.return_value.__enter__.return_value={'features':np.ones((1,2))}
+            camera_main(Path('.'),stop,Mock())
+        status=publish.call_args.args[1]
+        self.assertTrue(status['protect_request'])
+        self.assertTrue(status['stranger_detected'])
+        self.assertEqual(status['last_stranger_sequence'],0)
+        self.assertEqual(status['last_risk_sequence'],1)
+        self.assertEqual(status['last_risk_observed_at'],11.3)
+        worker=self.worker()
+        self.assertTrue(worker.accept_status(status))
+        self.assertTrue(worker.accept_status(protected_packet(3,11.6,1,11.3)))
+        self.assertTrue(worker.new_protection_event)
+        self.assertTrue(worker.risk(11.7)[0])
         reader.close.assert_called_once()
 
 
