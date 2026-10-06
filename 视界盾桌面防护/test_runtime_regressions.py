@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import subprocess
 from unittest.mock import Mock, patch
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
@@ -28,6 +29,33 @@ class RuntimeRegressions(unittest.TestCase):
         with patch.object(backend.server, 'nextPendingConnection', return_value=peer):
             backend.accept_service()
         self.assertEqual(updates, [packet])
+
+    def test_backend_limits_blas_before_fresh_child_import_without_changing_parent(self):
+        backend = Backend()
+        try:
+            with patch.dict(os.environ, {'OPENBLAS_NUM_THREADS':'8', 'VISION_SHIELD_TEST_INHERITED':'yes'}), \
+                    patch('process_lifetime.ProcessJob'), patch.object(backend.process, 'start'):
+                backend.start()
+                environment = backend.process.processEnvironment()
+                self.assertEqual(os.environ['OPENBLAS_NUM_THREADS'], '8')
+                child_environment = dict(item.split('=', 1) for item in environment.toStringList())
+                # Real fresh interpreter imports NumPy only after receiving the
+                # service environment; no camera, OCR model or screen capture.
+                command = ('import os,json,numpy as np; '
+                           'v=np.arange(128,dtype=np.float32); '
+                           'print(json.dumps({"threads":os.environ.get("OPENBLAS_NUM_THREADS"),'
+                           '"inherited":os.environ.get("VISION_SHIELD_TEST_INHERITED"),'
+                           '"dot":float(v@v)}))')
+                run = subprocess.run([sys.executable, '-c', command], env=child_environment,
+                                     capture_output=True, text=True, timeout=15, check=True)
+                result = json.loads(run.stdout)
+                self.assertEqual(result, {'threads':'1', 'inherited':'yes', 'dot':690880.0})
+        finally:
+            backend.watchdog.stop()
+            backend.server.close()
+            if backend.job is not None:
+                backend.job.close()
+            backend.deleteLater()
 
     def test_malformed_alert_does_not_break_valid_status(self):
         backend = Backend()
