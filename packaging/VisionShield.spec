@@ -6,6 +6,7 @@ desktop = root/'视界盾桌面防护'
 camera = root/'视界盾开发'
 models = [
     (camera/'models/face_detection_yunet_2023mar.onnx', '视界盾开发/models'),
+    (camera/'models/face_detection_yunet_2026may.onnx', '视界盾开发/models'),
     (camera/'models/face_recognition_sface_2021dec.onnx', '视界盾开发/models'),
 ]
 for name in ('ch_PP-OCRv4_det_infer.onnx', 'ch_PP-OCRv4_rec_infer.onnx', 'ch_ppocr_mobile_v2.0_cls_infer.onnx'):
@@ -15,10 +16,11 @@ for source, _ in models:
         raise FileNotFoundError('Missing public model: '+str(source))
 
 data = [(str(path), target) for path, target in models]
+data.append((str(root/'packaging/YuNet-LICENSE.txt'), 'licenses'))
 data += collect_data_files('rapidocr_onnxruntime', excludes=['models/*'])
 data += collect_data_files('uiautomation')
 data += collect_data_files('comtypes', include_py_files=True)
-hidden = ['guard_service', 'app_shell', 'desktop_guard', 'camera_worker', 'owner_enrollment', 'face_detection',
+hidden = ['guard_service', 'app_shell', 'desktop_guard', 'camera_worker', 'owner_enrollment', 'face_detection', 'onnx_yunet',
           'fast_ocr', 'gpu_blur', 'native_text', 'package_check', 'identity_test', 'camera_test',
           'owner_tracking', 'identity_state', 'identity_sender', 'owner_presence', 'app_scope', 'scope_picker',
           'region_tracker', 'region_features', 'region_anchor', 'region_worker']

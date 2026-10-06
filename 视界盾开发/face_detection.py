@@ -59,7 +59,9 @@ def merge_faces(candidates, image_size, confidence=.6, full_count=0):
 
 class FaceScanner:
     """整帧＋两块轮转分区；小脸候选优先在局部图像中重新检测。"""
-    def __init__(self, detector, detail_interval=.1, max_edge=960, diagnostics=False):
+    def __init__(self, detector, detail_interval=.1, max_edge=960, diagnostics=False, focus_tile_count=1):
+        if focus_tile_count not in (1,2):
+            raise ValueError('focus_tile_count must be 1 or 2')
         self.detector = detector
         self.detail_interval = detail_interval
         self.max_edge = max_edge
@@ -68,6 +70,7 @@ class FaceScanner:
         self.weak_candidates = []
         self.current_unconfirmed_count = 0
         self.tile_index = 0
+        self.focus_tile_count = focus_tile_count
         self.focus = None
         self.focus_misses = 0
         self.diagnostics = diagnostics
@@ -192,7 +195,7 @@ class FaceScanner:
                 for patch,label in patches:
                     faces.extend(self._detect(patch,origin,True,max_edge=640,frame_size=(width,height),label=label))
                 focus_attempted=True
-                count=2 if focus_is_full else 1
+                count=2 if focus_is_full else self.focus_tile_count
             # 六块重叠分区：1280×720摄像头中640×432→1280×864，实现2倍放大。
             tile_width,tile_height=max(1,round(width*.5)),max(1,round(height*.6))
             tiles=[(x,y) for y in (0,height-tile_height)

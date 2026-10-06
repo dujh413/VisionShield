@@ -12,11 +12,19 @@
 
 同日r4继续修复：整窗配置在软件重启后需暂停防护并重新点击目标窗口，不能自动改绑同应用另一窗口；首次截图排除验证期间范围变化会取消旧遮罩并重试。姿态宽限增加尺寸连续性检查，过期会话须累计新的机主匹配。具体复现与原生窗口验证见 `范围绑定与机主会话修复记录_20261006.md`。
 
+后续人脸加速版使用同权重YuNet的ONNX Runtime CPU引擎、关闭空闲自旋，并修正重复分区限频；后台继承单线程OpenBLAS环境以减少线程内存开销。初始化失败可回退旧检测器，推理异常进入保护状态。已有机主模板及SFace保持原样。公开样本与实人验证边界见 `人脸推理加速与扫描节拍验证_20261006.md`，不承诺严重模糊或遮挡人脸一定检出。
+
 打包版的本人模板位于 `%LOCALAPPDATA%\VisionShield\private\owner_templates.npz`，运行元数据日志位于 `%LOCALAPPDATA%\VisionShield\records`。设置沿用当前 Windows 用户的 QSettings 配置。更新前退出软件，替换完整软件文件夹，用户数据保持原位置。源码模式保留原有模块内的数据路径；测试版不自动迁移源码里的机主模板，请本人在设置中明确登记。
 
 ## 重建
 
-在 Windows x64 / Python 3.12 环境中准备 `packaging/requirements-build.txt`。RapidOCR会依赖CPU版onnxruntime，而DirectML版提供同名Python模块；安装依赖后最后执行 `python -m pip install --force-reinstall --no-deps onnxruntime-directml==1.24.4`，确认实际导入版本为1.24.4且提供DmlExecutionProvider。OpenCV实际导入版本应为4.10.0。将公共模型放到 spec 列出的两个模块 models 目录，运行：
+在 Windows x64 / Python 3.12 环境中准备 `packaging/requirements-build.txt`。RapidOCR会依赖CPU版onnxruntime，而DirectML版提供同名Python模块；安装依赖后最后执行 `python -m pip install --force-reinstall --no-deps onnxruntime-directml==1.24.4`，确认实际导入版本为1.24.4且提供DmlExecutionProvider。OpenCV实际导入版本应为4.10.0。将公共模型放到 spec 列出的两个模块 models 目录；新增动态输入YuNet可用以下脚本从固定官方提交下载，写入前验证SHA256，已有正确文件时不重复下载。模型不提交Git。
+
+```powershell
+& '完整路径\python.exe' '.\视界盾开发\prepare_face_model.py'
+```
+
+确认模型齐备后构建：
 
 ```powershell
 & .\packaging\Build.ps1 -Python '完整路径\python.exe' -OutputName 'windows-test-v2'
@@ -32,6 +40,6 @@
 & '.\dist\windows-test-v2\VisionShield\VisionShield.exe' --package-check '完整路径\package-check.json'
 ```
 
-此模式检查轻量界面、后台本机通信、摄像头与OCR并行、两轮启动停止、虚构文字OCR和敏感规则、公共人脸模型、用户数据路径、采集排除与原生文字读取依赖。会打开摄像头、短暂验证遮罩，但不会登记本人或保存照片、桌面原文；它不代表真实机主识别准确率或跨电脑性能测试。默认日常启动不执行验收模式。
+此模式执行12项检查，包括轻量界面、后台本机通信、摄像头与OCR并行、两轮启动停止、虚构文字OCR和敏感规则、公共人脸模型及加速引擎、用户数据路径、采集排除与原生文字读取依赖，并单独检查区域跟随。会打开摄像头、短暂验证遮罩，但不会登记本人或保存照片、桌面原文；它不代表真实机主识别准确率或跨电脑性能测试。默认日常启动不执行验收模式。随包保留 `_internal/licenses/YuNet-LICENSE.txt`。
 
 本机包和验收日志被 Git 忽略，仅同步源码、打包配置与说明。当前为未签名的开发测试版，尚未完成新电脑联合验收或制作正式安装器。

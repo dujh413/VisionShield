@@ -111,10 +111,10 @@ class CameraEventTests(unittest.TestCase):
         presence=Mock();presence.update.return_value={
             'owner_verified':True,'owner_session_active':True,'pose_grace':False,
             'stranger_detected':False,'protect_request':False}
-        with patch('identity_test.load_models',return_value=(Mock(),Mock())), \
+        with patch('identity_test.load_models',return_value=(Mock(backend='onnxruntime-cpu'),Mock())), \
              patch('camera_test.open_camera') as open_camera, \
              patch('camera_test.LatestCameraFrame',return_value=reader), \
-             patch('face_detection.FaceScanner',return_value=scanner), \
+             patch('face_detection.FaceScanner',return_value=scanner) as scanner_factory, \
              patch('owner_tracking.ShortTracker',return_value=tracker), \
              patch('owner_presence.OwnerPresence',return_value=presence), \
              patch('ocr_worker.put_latest') as publish, \
@@ -126,6 +126,8 @@ class CameraEventTests(unittest.TestCase):
             camera_main(Path('.'),stop,Mock())
         open_camera.assert_called_once()
         scanner.detect.assert_called_once_with(reader.read.return_value[1],11.3)
+        self.assertEqual(scanner_factory.call_args.kwargs['detail_interval'],0)
+        self.assertEqual(scanner_factory.call_args.kwargs['focus_tile_count'],2)
         self.assertEqual(presence.update.call_args.args[0],11.3)
         self.assertEqual(publish.call_args.args[1]['observed_at'],11.3)
         self.assertEqual(publish.call_args.args[1]['frame_age_ms'],200.)

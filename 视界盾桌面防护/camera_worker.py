@@ -60,7 +60,11 @@ def camera_main(root, stop, outputs, preview=False, diagnostics=False, template_
             if templates.ndim != 2 or not len(templates) or not np.isfinite(templates).all():
                 raise ValueError('Invalid owner template')
         tracker, presence = ShortTracker(), OwnerPresence()
-        scanner, bystander = FaceScanner(detector,diagnostics=diagnostics), BystanderHold()
+        # 主循环已限频且只读新帧；不因设备时钟的约100ms抖动跳过背景分区。
+        # 加速引擎保留每帧两块背景扫描，避免弱局部候选拖慢其余身后区域。
+        scanner = FaceScanner(detector,detail_interval=0,diagnostics=diagnostics,
+                              focus_tile_count=2 if getattr(detector,'backend',None)=='onnxruntime-cpu' else 1)
+        bystander = BystanderHold()
         journal=StrangerJournal()
         camera = open_camera(0, 'auto', resolution=(1280, 720))
         reader = LatestCameraFrame(camera)
@@ -112,7 +116,9 @@ def camera_main(root, stop, outputs, preview=False, diagnostics=False, template_
                        'processing_ms':round((published_at-before)*1000,2),
                        'face_sizes':[[round(float(f[2])),round(float(f[3]))] for f in faces],
                        'face_confidences':[round(float(f[14]),3) for f in faces]}
-            if diagnostics:item['identity_diagnostics']=identity_diagnostics
+            if diagnostics:
+                item['identity_diagnostics']=identity_diagnostics
+                item['face_backend']=getattr(detector,'backend','opencv-cpu')
             if preview:
                 item['brightness'] = round(float(image.mean()),1)
                 item['best_score'] = max(scores,default=None)

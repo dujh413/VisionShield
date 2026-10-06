@@ -95,10 +95,38 @@ class FaceDetectionTests(unittest.TestCase):
         scanner.detect(image,.25)
         self.assertEqual(detector.detect.call_count,7)
 
+    def test_fresh_quantized_camera_timestamps_do_not_skip_product_background_scan(self):
+        detector = Mock()
+        detector.detect.return_value = (None,None)
+        scanner = FaceScanner(detector,detail_interval=0)
+        image = np.zeros((64,96,3),np.uint8)
+        # GetTickCount64 samples around a100ms camera loop alternate below and
+        # above100ms; a second .1s gate would skip half these new observations.
+        for stamp in (0,.09375,.203125,.296875,.40625,.5):
+            scanner.detect(image,stamp)
+            self.assertTrue(scanner.last_metrics['detail_scan'])
+        self.assertEqual(detector.detect.call_count,18)
+
     def test_low_confidence_candidate_requires_repeated_spatial_evidence(self):
         scanner=FaceScanner(Mock())
         self.assertEqual(scanner._confirm_candidates([face(score=.7)],0),[])
         self.assertEqual(len(scanner._confirm_candidates([face(104,102,score=.72)],.1)),1)
+
+    def test_weak_focus_does_not_delay_six_background_tiles_on_accelerated_path(self):
+        detector = Mock()
+        detector.detect.return_value = (None,None)
+        scanner = FaceScanner(detector,detail_interval=0,diagnostics=True,focus_tile_count=2)
+        scanner.focus = {'face':face(35,25,12,15,.7),'at':0}
+        image = np.zeros((100,160,3),np.uint8)
+        scanned = []
+        for stamp in (0,.09375,.203125):
+            scanner.detect(image,stamp)
+            labels = [item['scan'] for item in scanner.last_metrics['scans']]
+            self.assertIn('focus',labels)
+            self.assertIn('focus_contrast',labels)
+            scanned.extend(label for label in labels if label.startswith('tile_'))
+        self.assertEqual(scanned,['tile_'+str(i) for i in range(6)])
+        self.assertEqual(detector.detect.call_count,15)
 
     def test_low_confidence_single_frame_or_different_location_is_not_a_person(self):
         scanner=FaceScanner(Mock())
