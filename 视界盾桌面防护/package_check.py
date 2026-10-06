@@ -93,6 +93,10 @@ def main():
         recognizer.feature(np.zeros((112, 112, 3), dtype=np.uint8))
         checks['public_face_models'] = True
         checks['accelerated_face_backend'] = getattr(detector,'backend',None) == 'onnxruntime-cpu'
+        from face_detection import FaceScanner
+        scan=FaceScanner(detector,detail_interval=0,mirror_scan=True,diagnostics=True)
+        scan.detect(np.zeros((720,1280,3),dtype=np.uint8))
+        checks['enhanced_face_scan'] = 'background_mirror' in {item['scan'] for item in scan.last_metrics['scans']}
         checks['writable_data_outside_bundle'] = not owner_file(camera_root()).is_relative_to(resource_root()) and not records_directory().is_relative_to(resource_root())
         from screen_capture import ScreenCapture
         from overlay_window import OverlayWindow
@@ -121,6 +125,6 @@ def main():
         panel.hide()
         temp.cleanup()
         result['completed_cycles'] = cycles
-        result['passed'] = len(checks) == 12 and all(checks.values()) and result.get('region_tracking', {}).get('passed') is True and not result.get('service_error') and not result.get('diagnostic_error')
+        result['passed'] = len(checks) == 13 and all(checks.values()) and result.get('region_tracking', {}).get('passed') is True and not result.get('service_error') and not result.get('diagnostic_error')
         destination.write_text(json.dumps(result, ensure_ascii=True, indent=2), encoding='utf-8')
     return 0 if result['passed'] else 1

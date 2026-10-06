@@ -128,6 +128,7 @@ class CameraEventTests(unittest.TestCase):
         scanner.detect.assert_called_once_with(reader.read.return_value[1],11.3)
         self.assertEqual(scanner_factory.call_args.kwargs['detail_interval'],0)
         self.assertEqual(scanner_factory.call_args.kwargs['focus_tile_count'],2)
+        self.assertTrue(scanner_factory.call_args.kwargs['mirror_scan'])
         self.assertEqual(presence.update.call_args.args[0],11.3)
         self.assertEqual(publish.call_args.args[1]['observed_at'],11.3)
         self.assertEqual(publish.call_args.args[1]['frame_age_ms'],200.)

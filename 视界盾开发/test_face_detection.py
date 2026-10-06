@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 import numpy as np
 
-from face_detection import BystanderHold, FaceScanner, map_faces, merge_faces
+from face_detection import BystanderHold, FaceScanner, map_faces, merge_faces, unmirror_faces
 
 
 def face(x=100, y=100, w=100, h=100, score=.95):
@@ -12,6 +12,54 @@ def face(x=100, y=100, w=100, h=100, score=.95):
 
 
 class FaceDetectionTests(unittest.TestCase):
+    def test_background_enhancement_alternates_without_skipping_normal_observations(self):
+        detector=Mock();detector.detect.return_value=(None,None)
+        scanner=FaceScanner(detector,detail_interval=0,mirror_scan=True,diagnostics=True)
+        image=np.zeros((64,96,3),np.uint8)
+        enhanced=[]
+        for stamp in (0,.09375,.203125,.296875):
+            scanner.detect(image,stamp)
+            scans=[item['scan'] for item in scanner.last_metrics['scans']]
+            self.assertEqual(scans.count('full'),1)
+            self.assertEqual(len([name for name in scans if name.startswith('tile_')]),2)
+            enhanced.append('background_mirror' in scans)
+        self.assertEqual(enhanced,[True,False,True,False])
+        self.assertEqual(detector.detect.call_count,14)
+
+    def test_mirror_inverse_preserves_original_eye_mouth_order_and_input(self):
+        original=face(20,30,40,60)
+        mirrored=original.copy()
+        mirrored[0]=200-original[0]-original[2]
+        points=original[4:14].reshape(5,2).copy()
+        points[:,0]=199-points[:,0]
+        mirrored[4:14]=points[[1,0,2,4,3]].reshape(10)
+        before=mirrored.copy()
+        np.testing.assert_array_equal(unmirror_faces([mirrored],200)[0],original)
+        np.testing.assert_array_equal(mirrored,before)
+        self.assertEqual(unmirror_faces(None,200).shape,(0,15))
+
+    def test_mirror_scan_candidate_maps_to_actual_background_and_keeps_owner_coordinates(self):
+        detector=Mock()
+        owner=face(110,30,40,60,.95)
+        background=face(105,20,20,25,.7)
+        detector.detect.side_effect=[(None,np.array([owner])),(None,np.array([background])),
+                                     (None,None),(None,None)]
+        scanner=FaceScanner(detector,max_edge=200,mirror_scan=True,diagnostics=True)
+        image=np.zeros((100,200,3),np.uint8)
+        # Keep the mock inverse at camera scale while testing the state machine.
+        detect=scanner._detect
+        def stage(patch,*args,**kwargs):
+            if kwargs.get('label')=='background_mirror':kwargs['max_edge']=200
+            return detect(patch,*args,**kwargs)
+        scanner._detect=stage
+        result=scanner.detect(image,0)
+        self.assertEqual(len(result),1)
+        np.testing.assert_array_equal(result[0],owner)
+        self.assertEqual(scanner.current_unconfirmed_count,1)
+        candidate=scanner.weak_candidates[0]['face']
+        self.assertEqual(float(candidate[0]),75)
+        self.assertIn('background_mirror',[item['scan'] for item in scanner.last_metrics['scans']])
+
     def test_crop_mapping_includes_box_landmarks_and_preserves_score(self):
         original=face(20,40,60,80)
         result=map_faces([original],2,(300,100))[0]
@@ -58,6 +106,17 @@ class FaceDetectionTests(unittest.TestCase):
     def test_two_full_frame_faces_cannot_be_rejected_by_nested_roi_heuristic(self):
         full=face(100,100,200,260,.91);other=face(135,160,130,146,.87)
         self.assertEqual(len(merge_faces([full,other],(1280,720),full_count=2)),2)
+
+    def test_partial_roi_outside_full_box_needs_matching_side_landmarks_to_deduplicate(self):
+        full=face(100,100,200,260,.95)
+        partial=face(93,130,120,220,.86)
+        points=partial[4:14].reshape(5,2)
+        points[[0,2,3]]=full[4:14].reshape(5,2)[[0,2,3]]
+        self.assertEqual(len(merge_faces([full,partial],(800,600),full_count=1)),1)
+        # A second real face in similar geometry has its own landmarks.
+        other=face(93,130,120,220,.86)
+        self.assertEqual(len(merge_faces([full,other],(800,600),full_count=1)),2)
+        self.assertEqual(len(merge_faces([full,partial],(800,600),full_count=2)),2)
 
     def test_invalid_faces_and_outside_centers_rejected(self):
         invalid=face();invalid[4]=float('nan')
@@ -111,6 +170,57 @@ class FaceDetectionTests(unittest.TestCase):
         scanner=FaceScanner(Mock())
         self.assertEqual(scanner._confirm_candidates([face(score=.7)],0),[])
         self.assertEqual(len(scanner._confirm_candidates([face(104,102,score=.72)],.1)),1)
+
+    def test_strong_then_weaker_fresh_observation_confirms_current_face(self):
+        scanner=FaceScanner(Mock())
+        first=face(100,100,40,50,.81)
+        next_face=face(109,105,42,52,.68)
+        scanner._confirm_candidates([first],0)
+        result=scanner._confirm_candidates([next_face],.3)
+        self.assertEqual(len(result),1)
+        np.testing.assert_array_equal(result[0],next_face)
+        self.assertEqual(scanner.current_unconfirmed_count,0)
+        # No face in the new frame means no box can be replayed.
+        self.assertEqual(scanner._confirm_candidates([],.4),[])
+        self.assertEqual(scanner.previous_confirmed,[])
+
+    def test_strong_history_cannot_confirm_stale_same_frame_or_other_face(self):
+        for stamp,candidate in ((0,face(score=.68)),(.01,face(score=.68)),(-.1,face(score=.68)),(1.1,face(score=.68)),
+                                (.3,face(400,100,score=.68)),(.3,face(w=30,h=30,score=.68))):
+            with self.subTest(stamp=stamp,candidate=candidate[:4]):
+                scanner=FaceScanner(Mock())
+                scanner._confirm_candidates([face(score=.81)],0)
+                self.assertEqual(scanner._confirm_candidates([candidate],stamp),[])
+                self.assertEqual(scanner.current_unconfirmed_count,1)
+
+    def test_strong_history_does_not_bypass_weak_landmark_validation(self):
+        scanner=FaceScanner(Mock());scanner._confirm_candidates([face(score=.81)],0)
+        bad=face(score=.68);bad[4]=-100
+        self.assertEqual(scanner._confirm_candidates([bad],.3),[])
+        self.assertEqual(scanner.weak_candidates,[])
+
+    def test_one_previous_face_cannot_confirm_two_current_weak_faces(self):
+        scanner=FaceScanner(Mock());scanner._confirm_candidates([face(score=.81)],0)
+        first,second=face(60,100,score=.68),face(140,100,score=.69)
+        result=scanner._confirm_candidates([first,second],.3)
+        self.assertEqual(len(result),1)
+        np.testing.assert_array_equal(result[0],first)
+        self.assertEqual(scanner.current_unconfirmed_count,1)
+
+    def test_accepted_weak_evidence_is_not_duplicated_in_strong_history(self):
+        scanner=FaceScanner(Mock())
+        scanner._confirm_candidates([face(score=.7)],0)
+        self.assertEqual(len(scanner._confirm_candidates([face(score=.7)],.1)),1)
+        self.assertEqual(scanner.previous_confirmed,[])
+        result=scanner._confirm_candidates([face(60,100,score=.68),face(140,100,score=.69)],.2)
+        self.assertEqual(len(result),1)
+
+    def test_strong_and_weak_histories_for_same_face_are_consumed_together(self):
+        scanner=FaceScanner(Mock())
+        scanner._confirm_candidates([face(score=.7)],0)
+        scanner._confirm_candidates([face(score=.9)],.1)
+        result=scanner._confirm_candidates([face(60,100,score=.68),face(140,100,score=.69)],.2)
+        self.assertEqual(len(result),1)
 
     def test_weak_focus_does_not_delay_six_background_tiles_on_accelerated_path(self):
         detector = Mock()
