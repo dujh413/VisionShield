@@ -6,13 +6,14 @@ import sys
 import uuid
 
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox,
                               QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea,
                               QSystemTrayIcon, QVBoxLayout, QWidget)
 
 from effect_controls import DEFAULT_BLUR_RADIUS, EffectControls
+from ui_style import STYLE, Switch
 
 
 class Backend(QObject):
@@ -184,8 +185,8 @@ def shield_icon():
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
-    painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor('#345f86'))
+    painter.setPen(QPen(QColor('#182620'), 3))
+    painter.setBrush(Qt.NoBrush)
     path = QPainterPath()
     path.moveTo(24, 3)
     path.lineTo(41, 10)
@@ -195,9 +196,6 @@ def shield_icon():
     path.lineTo(7, 10)
     path.closeSubpath()
     painter.drawPath(path)
-    painter.setPen(QColor('white'))
-    painter.drawLine(16, 24, 22, 30)
-    painter.drawLine(22, 30, 33, 17)
     painter.end()
     return QIcon(pixmap)
 
@@ -217,34 +215,16 @@ class Shell(QWidget):
         self.backend = backend if backend is not None else Backend(self)
         self.preview, self.quitting, self.state = preview, False, 'paused'
         self.session_profiles = {}
+        self.latest_status = {}
         self.setWindowTitle('视界盾')
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         self.setWindowIcon(shield_icon())
-        self.setMinimumSize(440, 400)
-        self.resize(440, 400)
-        self.setStyleSheet('''
-            QWidget { background: #fafafa; color: #20252b; font: 10pt "Microsoft YaHei UI"; }
-            QLabel { background: transparent; }
-            QLabel#title { font-size: 20px; font-weight: 600; }
-            QLabel#caption, QLabel#detail, QLabel#optionDescription { color: #737b86; }
-            QLabel#state { font-size: 24px; font-weight: 600; }
-            QLabel#section { font-size: 17px; font-weight: 600; }
-            QLabel#optionTitle { font-size: 14px; }
-            QFrame#separator { background: #e1e4e8; border: none; }
-            QPushButton { border: 1px solid #c9ced5; border-radius: 4px; padding: 8px 15px; background: #f7f8fa; }
-            QPushButton:hover { background: #eef1f5; border-color: #9ca8b5; }
-            QPushButton:pressed { background: #e3e8ee; }
-            QPushButton:focus { border: 2px solid #345f86; padding: 7px 14px; }
-            QPushButton#primary, QPushButton#save { background: #345f86; border-color: #345f86; color: white; font-weight: 600; }
-            QPushButton#primary:hover, QPushButton#save:hover { background: #2b5275; }
-            QPushButton:disabled { background: #e4e7eb; border-color: #d7dce2; color: #858e99; }
-            QCheckBox { spacing: 10px; }
-            QCheckBox:disabled { color: #9299a2; }
-        ''')
+        self.setMinimumWidth(480)
+        self.setStyleSheet(STYLE)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setContentsMargins(28, 22, 28, 22)
         layout.setSpacing(14)
-        title, caption = QLabel('视界盾'), QLabel('VisionShield')
+        title, caption = QLabel('VisionShield'), QLabel('屏幕隐私防护')
         title.setObjectName('title')
         caption.setObjectName('caption')
         self.status, self.detail = QLabel(), QLabel()
@@ -252,47 +232,63 @@ class Shell(QWidget):
         self.status.setWordWrap(True)
         self.detail.setObjectName('detail')
         self.detail.setWordWrap(True)
-        self.detail.setAlignment(Qt.AlignCenter)
-        self.detail.setMinimumHeight(64)
+        self.detail.setMinimumHeight(36)
         self.status_dot = QLabel('●')
         self.status_dot.setFixedWidth(22)
         self.status_dot.setAlignment(Qt.AlignCenter)
-        self.toggle = QPushButton()
-        self.toggle.setObjectName('primary')
-        self.toggle.setMinimumHeight(44)
+        self.toggle = Switch('启用防护')
+        self.toggle.setObjectName('guard_enabled')
         self.toggle.clicked.connect(self.toggle_guard)
         actions = QHBoxLayout()
         settings_button, hide_button = QPushButton('设置'), QPushButton('后台运行')
+        self.settings_button, self.hide_button = settings_button, hide_button
+        hide_button.setObjectName('primary')
         settings_button.clicked.connect(self.open_settings)
         hide_button.clicked.connect(self.hide)
-        footer = QLabel('本地处理 · 主显示器')
+        footer = QLabel('本地处理 · 不保存画面与原文')
         footer.setObjectName('caption')
-        actions.addWidget(footer)
-        actions.addStretch()
-        actions.addWidget(settings_button)
-        actions.addWidget(hide_button)
+        self.tray_hint = QLabel('关闭窗口后仍在托盘运行')
+        self.tray_hint.setObjectName('caption')
+        actions.addWidget(settings_button, 1)
+        actions.addWidget(hide_button, 1)
         layout.addWidget(title)
         layout.addWidget(caption)
-        layout.addWidget(separator())
-        layout.addStretch()
+        layout.addSpacing(12)
         state_row = QHBoxLayout()
         state_row.setSpacing(8)
-        state_row.addStretch()
         state_row.addWidget(self.status_dot)
-        state_row.addWidget(self.status)
+        state_row.addWidget(self.status, 1)
         state_row.addStretch()
+        state_row.addWidget(self.toggle)
         layout.addLayout(state_row)
         layout.addWidget(self.detail)
-        layout.addStretch()
+        self.owner_status, self.bystander_status = QLabel(), QLabel()
+        self.owner_status.setObjectName('ownerStatus')
+        self.bystander_status.setObjectName('bystanderStatus')
+        layout.addWidget(self.owner_status)
+        layout.addWidget(self.bystander_status)
+        layout.addWidget(separator())
+        self.scope_summary, self.effects_summary = QLabel(), QLabel()
+        self.scope_summary.setWordWrap(True)
+        self.effects_summary.setWordWrap(True)
+        for title_text, value in (('保护范围', self.scope_summary), ('防护效果', self.effects_summary)):
+            row = QHBoxLayout()
+            label = QLabel(title_text)
+            label.setObjectName('summaryLabel')
+            label.setFixedWidth(96)
+            row.addWidget(label)
+            row.addWidget(value, 1)
+            layout.addLayout(row)
+        layout.addWidget(separator())
         self.effect_checks = {}
         for key, text in (('shield_enabled','风险时遮蔽保护范围'),
                           ('popup_enabled','检测陌生人后弹窗'),
                           ('sound_enabled','检测陌生人后音效')):
-            check = QCheckBox(text)
+            check = QCheckBox(text, self)
             check.setChecked(self.settings.value(key, True, type=bool))
             check.toggled.connect(lambda value, name=key: self.change_effect(name, value))
             self.effect_checks[key] = check
-            layout.addWidget(check)
+            check.hide()  # 设置窗口编辑选择；主界面仅显示摘要。
         stored_effect = str(self.settings.value('effect_text', ''))
         self.effect_input = EffectControls(stored_effect or str(DEFAULT_BLUR_RADIUS))
         if self.effect_input.mode.currentData() == 'block':
@@ -303,14 +299,12 @@ class Shell(QWidget):
         self.effect_update_timer.timeout.connect(self.apply_effect_text)
         self.effect_input.changed.connect(lambda _: self.effect_update_timer.start(100))
         layout.addWidget(self.effect_input)
-        self.scope_summary = QLabel()
-        self.scope_summary.setObjectName('caption')
-        self.scope_summary.setWordWrap(True)
         self.refresh_scope_summary()
-        layout.addWidget(self.scope_summary)
-        layout.addWidget(self.toggle)
+        self.refresh_effect_summary()
         layout.addWidget(separator())
         layout.addLayout(actions)
+        layout.addWidget(footer)
+        layout.addWidget(self.tray_hint)
         self.tray = QSystemTrayIcon(self.windowIcon(), self)
         menu = QMenu(self)
         menu.addAction('打开视界盾').triggered.connect(self.show_panel)
@@ -325,13 +319,16 @@ class Shell(QWidget):
             self.tray.show()
         else:
             hide_button.hide()
+            self.tray_hint.setText('关闭窗口将停止防护并退出')
         self.backend.changed.connect(self.backend_changed)
         self.backend.stopped.connect(self.backend_stopped)
         if hasattr(self.backend,'alerted'):
             self.backend.alerted.connect(self.remind_owner)
+        if hasattr(self.backend, 'updated'):
+            self.backend.updated.connect(self.backend_updated)
         self.set_state('paused')
         self.setMinimumHeight(self.minimumSizeHint().height())
-        self.resize(440, max(560, self.sizeHint().height()))
+        self.resize(520, self.sizeHint().height())
 
     def change_effect(self, key, value):
         self.settings.setValue(key, bool(value))
@@ -347,6 +344,7 @@ class Shell(QWidget):
                 self.backend.send_preferences()
         if self.state == 'running':
             self.set_state(self.state, self.detail.text())
+        self.refresh_effect_summary()
 
     def apply_effect_text(self):
         self.effect_update_timer.stop()
@@ -359,16 +357,28 @@ class Shell(QWidget):
             self.backend.send_preferences()
         if self.state == 'running':
             self.set_state(self.state, self.detail.text())
+        self.refresh_effect_summary()
+
+    def refresh_effect_summary(self):
+        effect = '模糊遮蔽' if self.effect_input.mode.currentData() == 'blur' else '深色遮挡'
+        choices = [(key, text) for key, text in (('shield_enabled', effect),
+                   ('sound_enabled', '音效'), ('popup_enabled', '弹窗'))
+                   if self.settings.value(key, True, type=bool)]
+        self.effects_summary.setText(' · '.join(text for _, text in choices) or '仅检测，不遮蔽或提醒')
 
     def refresh_scope_summary(self):
         profiles = self.load_profiles()
         local = sum(profile['mode'] != 'window' for profile in profiles.values())
         whole = len(profiles)-local
-        self.scope_summary.setText(
+        explanation = (
             f'保护范围：已选 {local} 处局部、{whole} 个整窗，仅处理有效范围。无法定位时需重新选择。' if profiles else
             '保护范围：自动按应用与内容保护。需要限定范围时，请到设置中选择局部或整窗。')
-        if any(profile['mode']=='window' and not profile.get('binding') for profile in profiles.values()):
-            self.scope_summary.setText(self.scope_summary.text()+'\n整窗范围在软件重启后需到设置中重新点击目标窗口。')
+        reselection = any(profile['mode']=='window' and not profile.get('binding') for profile in profiles.values())
+        if reselection:
+            explanation += '\n整窗范围在软件重启后需到设置中重新点击目标窗口。'
+        self.scope_summary.setText(f'{len(profiles)} 个已选范围'+(' · 需重新选择' if reselection else '')
+                                   if profiles else '自动按应用与内容保护')
+        self.scope_summary.setToolTip(explanation)
 
     def load_profiles(self):
         from app_scope import valid_profiles
@@ -381,6 +391,8 @@ class Shell(QWidget):
 
     def set_state(self, state, detail=None):
         self.state = state
+        if state != 'running':
+            self.latest_status = {}
         labels = {'paused': ('防护未启用', '启用防护'), 'starting': ('正在启动', '启动中…'),
                   'running': ('防护已启用', '暂停防护'), 'stopping': ('正在停止', '停止中…'),
                   'error': ('防护异常', '停止并重试')}
@@ -390,17 +402,53 @@ class Shell(QWidget):
         if state == 'running' and (not getattr(self.backend, 'shield_enabled', True) or mode_off):
             title = '检测与提示已启用（不遮蔽）'
         self.status.setText(title)
-        dot_color = {'running': '#345f86', 'error': '#a04a40', 'starting': '#a8843e',
-                     'stopping': '#a8843e', 'paused': '#969da6'}[state]
+        dot_color = {'running': '#24724f', 'error': '#a04a40', 'starting': '#966c26',
+                     'stopping': '#966c26', 'paused': '#65756c'}[state]
         self.status_dot.setStyleSheet(f'color: {dot_color}; font-size: 18px;')
         self.toggle.setText(action)
+        self.toggle.setAccessibleName(action)
+        self.toggle.setChecked(state in ('starting', 'running', 'error'))
         self.toggle.setEnabled(state not in ('starting', 'stopping'))
         self.tray_toggle.setText(action)
         self.tray_toggle.setEnabled(self.toggle.isEnabled())
         self.detail.setText(detail or ('当前桌面未受保护。启用后开始本地检测。' if state == 'paused' else '请稍候。'))
         self.tray.setToolTip('视界盾 · '+title)
+        self.refresh_identity_status()
+
+    def backend_updated(self, value):
+        if self.state != 'stopping' and not self.quitting:
+            self.latest_status = value
+            self.refresh_identity_status()
+
+    def refresh_identity_status(self):
+        if self.state != 'running':
+            text = '尚未启动' if self.state == 'paused' else ('不可用' if self.state == 'error' else '等待状态')
+            self.owner_status.setText('机主识别'+text)
+            self.bystander_status.setText('旁观检测'+text)
+            return
+        value = self.latest_status
+        owner = '等待机主识别结果'
+        if value.get('owner_verified') is True:
+            owner = '机主已确认'
+        elif value.get('pose_grace') is True:
+            owner = '机主暂时偏头，正在重新确认'
+        elif value.get('faces_count') is not None:
+            owner = '机主尚未确认'
+        faces = value.get('faces_count')
+        if value.get('stranger_detected') is True or (type(faces) is int and faces > 1):
+            bystander = '检测到陌生人或旁人'
+        elif type(faces) is int and faces == 0:
+            bystander = '未检测到人脸，身份尚未确认'
+        elif type(faces) is int and faces == 1 and value.get('owner_verified') is True:
+            bystander = '当前未检测到旁人'
+        else:
+            bystander = '等待旁观检测结果'
+        self.owner_status.setText(owner)
+        self.bystander_status.setText(bystander)
 
     def toggle_guard(self):
+        # 点击开关先恢复已确认状态；捕获排除失败或预览模式不能显示已启用。
+        self.toggle.setChecked(self.state in ('starting', 'running', 'error'))
         if self.preview:
             self.detail.setText('界面预览模式：防护未运行。正常启动软件后可启用。')
             return
@@ -471,8 +519,12 @@ class Shell(QWidget):
 
     def open_settings(self):
         dialog = QDialog(self)
+        dialog.setObjectName('settingsDialog')
+        dialog.setAttribute(Qt.WA_WindowPropagation)
+        dialog.setStyleSheet(STYLE)
+        dialog.setWindowIcon(self.windowIcon())
         dialog.setWindowTitle('设置 · 视界盾')
-        dialog.setMinimumWidth(480)
+        dialog.setMinimumWidth(520)
         if self.state in ('starting', 'running'):
             from overlay_window import exclude_capture
             exclude_capture(dialog)
@@ -487,8 +539,15 @@ class Shell(QWidget):
         scroll.setWidget(contents)
         outer.addWidget(scroll, 1)
         layout = QVBoxLayout(contents)
-        layout.setContentsMargins(24, 22, 24, 0)
-        layout.setSpacing(14)
+        layout.setContentsMargins(28, 22, 28, 16)
+        layout.setSpacing(8)
+        title = QLabel('设置')
+        title.setObjectName('title')
+        subtitle = QLabel('选择适合你的防护方式')
+        subtitle.setObjectName('caption')
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addWidget(separator())
         heading = QLabel('防护效果')
         heading.setObjectName('section')
         layout.addWidget(heading)
@@ -496,10 +555,10 @@ class Shell(QWidget):
         caption.setObjectName('caption')
         layout.addWidget(caption)
         effects = {}
-        for index, (key, title, description) in enumerate((
-                ('shield_enabled', '风险时遮蔽保护范围', '仅在检测到风险时使用主界面选定的模糊或深色效果。'),
-                ('sound_enabled', '音效提示', '检测到陌生人或旁人时播放系统提示音。'),
-                ('popup_enabled', '弹窗提示', '检测到陌生人或旁人时显示隐私提醒。'))):
+        for key, title, description in (
+                ('shield_enabled', '遮蔽敏感内容', '检测到风险时，保护所选范围。'),
+                ('sound_enabled', '音效提示', '风险出现时播放提示音。'),
+                ('popup_enabled', '弹窗提示', '风险出现时显示隐私提醒。')):
             row = QHBoxLayout()
             row.setSpacing(16)
             text = QVBoxLayout()
@@ -511,33 +570,34 @@ class Shell(QWidget):
             explanation.setWordWrap(True)
             text.addWidget(label)
             text.addWidget(explanation)
-            checkbox = QCheckBox()
+            checkbox = Switch(title)
             checkbox.setObjectName(key)
             checkbox.setAccessibleName(title)
             label.setBuddy(checkbox)
-            checkbox.setMinimumSize(28, 28)
             checkbox.setChecked(self.settings.value(key, True, type=bool))
             effects[key] = checkbox
             row.addLayout(text, 1)
-            row.addWidget(checkbox, 0, Qt.AlignTop)
+            row.addWidget(checkbox, 0, Qt.AlignVCenter)
             layout.addLayout(row)
-            if index < 2:
-                layout.addWidget(separator())
-        note = QLabel('效果保存后立即生效；模糊强度可在主界面拖动调整。\n关闭遮蔽后仍检测风险并提示，屏幕内容保持可见。')
+        note = QLabel('模糊程度在主界面调节。关闭遮蔽后仍检测风险并提示，屏幕内容保持可见。')
         note.setObjectName('caption')
         note.setWordWrap(True)
         layout.addWidget(note)
         layout.addWidget(separator())
-        scope_heading = QLabel('选择保护范围')
+        scope_heading = QLabel('保护范围')
         scope_heading.setObjectName('section')
         layout.addWidget(scope_heading)
-        scope_note = QLabel('先暂停防护并打开目标应用，再选择下面一种方式。\n设置范围后仅保护所选部分，其他区域保持清晰。\n选择或清除范围会先保存本页选项，并立即应用。')
+        scope_note = QLabel('先暂停防护，再选择目标区域。仅保护所选范围，其他区域保持清晰。')
         scope_note.setObjectName('caption')
         scope_note.setWordWrap(True)
         layout.addWidget(scope_note)
-        scope_chat = QPushButton('局部保护：拖动框选区域…')
-        scope_window = QPushButton('整窗保护：点击目标窗口…')
-        reset_scope = QPushButton('清除所选范围，恢复自动保护')
+        scope_chat = QPushButton('框选局部区域')
+        scope_window = QPushButton('选择整个窗口')
+        reset_scope = QPushButton('清除范围，恢复自动保护')
+        scope_chat.setObjectName('selectLocalScope')
+        scope_window.setObjectName('selectWindowScope')
+        reset_scope.setObjectName('textAction')
+        reset_scope.setAccessibleName('清除所选保护范围，恢复自动保护')
         def choose_scope(whole):
             save_form()
             dialog.reject()
@@ -549,24 +609,56 @@ class Shell(QWidget):
         scope_chat.clicked.connect(lambda: choose_scope(False))
         scope_window.clicked.connect(lambda: choose_scope(True))
         reset_scope.clicked.connect(clear_scope)
-        layout.addWidget(scope_chat)
-        local_note = QLabel('框选对话区、输入框或其他局部；拖动窗口时跟随。\n定位丢失时暂停该选区遮蔽，并提示重新框选。\n纯视觉选区在软件重启后需重新框选。')
+        scope_buttons = QHBoxLayout()
+        scope_buttons.addWidget(scope_chat, 1)
+        scope_buttons.addWidget(scope_window, 1)
+        layout.addLayout(scope_buttons)
+        layout.addWidget(reset_scope, 0, Qt.AlignLeft)
+        local_note = QLabel('局部定位丢失时暂停该选区遮蔽，请重新框选。')
         local_note.setObjectName('caption')
         local_note.setWordWrap(True)
         layout.addWidget(local_note)
-        layout.addWidget(scope_window)
-        whole_note = QLabel('点击一个应用窗口，保护该窗口的全部可见内容。\n跟随窗口拖动与缩放，其他窗口保持清晰。\n软件重启后需重新点击目标窗口；不会自动改绑其他窗口。')
-        whole_note.setObjectName('caption')
-        whole_note.setWordWrap(True)
-        layout.addWidget(whole_note)
-        replace_note = QLabel('同一应用仅保存一个范围（局部或整窗）。再次选择会替换先前范围。')
+        scope_window.setToolTip('保护该窗口的全部可见内容；软件重启后需重新选择，不会自动改绑其他窗口。')
+        scope_chat.setToolTip('仅保护所框选的局部；定位失效时暂停该选区遮蔽，不扩大范围。重启后需重新框选。')
+        replace_note = QLabel('选择或清除范围会先保存本页选项。')
+        replace_note.setToolTip('同一应用仅保存一个范围，再次选择会替换旧范围。')
         replace_note.setObjectName('caption')
         replace_note.setWordWrap(True)
         layout.addWidget(replace_note)
-        layout.addWidget(reset_scope)
         for button in (scope_chat, scope_window, reset_scope):
             button.setEnabled(self.state == 'paused' and not self.preview)
-            button.setToolTip('请先暂停防护再配置范围' if self.state != 'paused' else '')
+            if self.state != 'paused':
+                button.setToolTip('请先暂停防护再配置范围。'+button.toolTip())
+        layout.addWidget(separator())
+        owner_heading = QLabel('机主识别')
+        owner_heading.setObjectName('section')
+        layout.addWidget(owner_heading)
+        from runtime_paths import camera_root, owner_file
+        registered = owner_file(camera_root()).is_file()
+        owner_row = QHBoxLayout()
+        owner_text = QVBoxLayout()
+        owner_label = QLabel('已有机主模板' if registered else '机主尚未登记')
+        owner_label.setObjectName('optionTitle')
+        owner_note = QLabel('特征仅保存在本机')
+        owner_note.setObjectName('caption')
+        owner_text.addWidget(owner_label)
+        owner_text.addWidget(owner_note)
+        owner_row.addLayout(owner_text, 1)
+        enroll = QPushButton('更新机主' if registered else '登记机主')
+        enroll.setObjectName('enrollOwner')
+        enroll.setEnabled(self.state == 'paused' and not self.preview)
+        owner_row.addWidget(enroll)
+        layout.addLayout(owner_row)
+        enroll_note = QLabel('登记前请先暂停防护'+('；预览模式不打开摄像头。' if self.preview else '。'))
+        enroll_note.setObjectName('caption')
+        layout.addWidget(enroll_note)
+        def register():
+            if self.state != 'paused':
+                self.detail.setText('请先暂停防护，再登记机主。')
+                return
+            dialog.reject()
+            self.register_owner()
+        enroll.clicked.connect(register)
         layout.addWidget(separator())
         startup_heading = QLabel('启动偏好')
         startup_heading.setObjectName('section')
@@ -578,19 +670,9 @@ class Shell(QWidget):
         hidden.setEnabled(self.has_tray)
         layout.addWidget(auto)
         layout.addWidget(hidden)
-        startup_note = QLabel('上述启动设置在下次打开软件时生效。')
+        startup_note = QLabel('下次打开软件时生效。')
         startup_note.setObjectName('caption')
         layout.addWidget(startup_note)
-        layout.addWidget(separator())
-        enroll = QPushButton('登记 / 更新机主')
-        def register():
-            if self.state != 'paused':
-                self.detail.setText('请先暂停防护，再登记机主。')
-                dialog.reject()
-                return
-            dialog.reject()
-            self.register_owner()
-        enroll.clicked.connect(register)
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.setLayoutDirection(Qt.RightToLeft)
         buttons.button(QDialogButtonBox.Save).setText('保存')
@@ -599,13 +681,16 @@ class Shell(QWidget):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         footer = QHBoxLayout()
-        footer.setContentsMargins(24, 12, 24, 22)
-        footer.addWidget(enroll)
+        footer.setContentsMargins(28, 12, 28, 18)
+        footer_note = QLabel('设置保存在本机')
+        footer_note.setObjectName('caption')
+        footer.addWidget(footer_note)
         footer.addStretch()
         footer.addWidget(buttons)
+        outer.addWidget(separator())
         outer.addLayout(footer)
         available_height = self.screen().availableGeometry().height()
-        dialog.resize(500, min(850, max(360, available_height-72)))
+        dialog.resize(560, min(820, max(360, available_height-72)))
         def save_form():
             for key, checkbox in effects.items():
                 self.effect_checks[key].setChecked(checkbox.isChecked())

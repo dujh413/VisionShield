@@ -1,6 +1,6 @@
 """轻量原生效果选择；不加载图像库或识别模型。"""
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QSlider, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QButtonGroup, QComboBox, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget
 
 from mask_effect import parse_effect
 
@@ -25,23 +25,51 @@ class EffectControls(QWidget):
         self.slider.setObjectName('blur_radius')
         self.slider.setAccessibleName('模糊强度，向右拖动增强')
         self.slider.setRange(2, 64)
+        self.slider.setMinimumHeight(28)
         self.slider.setValue(DEFAULT_BLUR_RADIUS)
         self.strength = QLabel()
+        self.strength.setObjectName('summaryLabel')
+        self.live_hint = QLabel('拖动后立即生效')
+        self.live_hint.setObjectName('caption')
         self.explanation = QLabel()
         self.explanation.setObjectName('caption')
         self.explanation.setWordWrap(True)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        layout.setSpacing(8)
         row = QHBoxLayout()
-        row.addWidget(QLabel('遮蔽效果'))
-        row.addWidget(self.mode, 1)
+        label = QLabel('遮蔽方式')
+        label.setObjectName('summaryLabel')
+        row.addWidget(label)
+        self.mode_buttons = {}
+        self.mode_group = QButtonGroup(self)
+        if allow_off:
+            row.addWidget(self.mode, 1)
+        else:
+            self.mode.setParent(self)
+            self.mode.hide()
+            row.addSpacing(16)
+            for mode, title in (('blur', '模糊'), ('block', '深色')):
+                button = QPushButton(title)
+                button.setObjectName('segment')
+                button.setCheckable(True)
+                button.setAccessibleName('遮蔽方式：'+title)
+                button.clicked.connect(lambda checked, value=mode: self.mode.setCurrentIndex(self.mode.findData(value)))
+                self.mode_group.addButton(button)
+                self.mode_buttons[mode] = button
+                row.addWidget(button)
+            row.addStretch()
         layout.addLayout(row)
-        layout.addWidget(self.strength)
         row = QHBoxLayout()
-        row.addWidget(QLabel('较弱'))
-        row.addWidget(self.slider, 1)
-        row.addWidget(QLabel('较强'))
+        row.addWidget(self.strength)
+        row.addStretch()
+        row.addWidget(self.live_hint)
+        layout.addLayout(row)
+        layout.addWidget(self.slider)
+        row = QHBoxLayout()
+        row.addWidget(QLabel('弱'))
+        row.addStretch()
+        row.addWidget(QLabel('强'))
         layout.addLayout(row)
         layout.addWidget(self.explanation)
         self.set_from_text(text)
@@ -71,13 +99,17 @@ class EffectControls(QWidget):
     def _refresh(self):
         mode = self.mode.currentData()
         self.mode.setEnabled(self.shield_enabled)
+        for value, button in self.mode_buttons.items():
+            button.setChecked(value == mode)
+            button.setEnabled(self.shield_enabled)
         self.slider.setEnabled(self.shield_enabled and mode == 'blur')
         value = self.slider.value()
         strength = '较弱' if value < 16 else ('适中' if value < 40 else '较强')
-        self.strength.setText('模糊强度：'+strength)
+        self.strength.setText('模糊程度 · '+strength)
         self.strength.setEnabled(self.shield_enabled and mode == 'blur')
+        self.live_hint.setText('拖动后立即生效' if mode == 'blur' and self.shield_enabled else '当前未使用模糊')
         descriptions = {
-            'blur': '向右拖动使文字更难辨认；特别敏感的内容可选择深色遮挡。',
+            'blur': '向右拖动增强；较弱模糊可能仍可读。',
             'block': '使用不透明深色遮挡，仅作用于保护范围。',
             'off': '保留风险检测与提示，屏幕内容保持可见。',
         }
