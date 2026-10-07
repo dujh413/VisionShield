@@ -233,3 +233,16 @@ captures/
 
 # Development artifacts and local workspace helpers
 test_artifacts/
+
+# Credentials and local sensitive exports
+*.pem
+*.key
+*.pfx
+*.p12
+*.jks
+*.kdbx
+*.csv
+*.npy
+*.mp4
+*.avi
+*error.log
