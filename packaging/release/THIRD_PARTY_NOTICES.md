@@ -1,6 +1,6 @@
 # Third-party components
 
-VisionShield uses unmodified dynamically loaded third-party libraries. The corresponding license texts are included in LICENSES. This notice does not grant a license to the private VisionShield application source.
+VisionShield uses unmodified dynamically loaded third-party libraries. The corresponding license texts are included in LICENSES. This notice does not grant a license to the VisionShield application source.
 
 - Qt / PySide6 / Shiboken6 6.11.2: LGPL-3.0 option. Core, Gui, Widgets, Network, OpenGL, Svg and image-format libraries remain separate DLLs. Replacement and debugging of these LGPL libraries, including reverse engineering for that purpose, is permitted. Their unmodified corresponding sources are supplied in the separate ThirdParty-Sources asset at the same release.
 - GEOS 3.13.1, used through Shapely: LGPL-2.1. Corresponding source is included in the ThirdParty-Sources asset. Shapely itself uses BSD terms.
