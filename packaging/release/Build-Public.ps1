@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory=$true)][string]$Repository,
     [Parameter(Mandatory=$true)][string]$Python,
     [Parameter(Mandatory=$true)][string]$SourceArchiveDirectory,
-    [string]$Version = '0.1.0-preview.1'
+    [string]$Version = '0.1.0-preview.3'
 )
 $ErrorActionPreference = 'Stop'
 if ($Version -notmatch '^\d+\.\d+\.\d+(?:-(?:preview|alpha|beta)\.\d+)?$') { throw 'Use a semantic version.' }
