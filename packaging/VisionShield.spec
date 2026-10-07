@@ -31,13 +31,19 @@ a = Analysis([str(root/'VisionShield.py')], pathex=[str(root), str(desktop), str
              binaries=collect_dynamic_libs('onnxruntime'), datas=data, hiddenimports=hidden,
              excludes=['paddle', 'paddleocr', 'paddlex', 'torch', 'tensorflow', 'mediapipe',
                        'matplotlib', 'scipy', 'pandas', 'PySide6.QtWebEngineCore',
-                       'PySide6.QtWebEngineWidgets', 'PySide6.QtQml', 'PySide6.QtQuick'],
+                       'PySide6.QtWebEngineWidgets', 'PySide6.QtQml', 'PySide6.QtQuick',
+                       'PySide6.QtPdf', 'PySide6.QtVirtualKeyboard'],
              noarchive=False)
 # Qt 6.11使用Windows原生ICU接口，不能被其他工具的同名ICU DLL覆盖。
 # OpenCL.dll and vendor drivers belong to Windows/the installed display driver.
 # Never redistribute an accidentally discovered host OpenCL loader with the app.
 a.binaries = [entry for entry in a.binaries if Path(entry[0]).name.lower() not in ('icuuc.dll', 'icuin.dll', 'icu.dll', 'opencl.dll')
               and not ('opencv_videoio_ffmpeg' in entry[0] and '4100' not in entry[0])]
+# The widget-based application does not use PDF/QML or the optional Qt virtual
+# keyboard. Plugin collection can otherwise pull these modules in indirectly.
+unused_qt = {'qt6pdf.dll', 'qt6virtualkeyboard.dll', 'qpdf.dll', 'qtvirtualkeyboardplugin.dll'}
+a.binaries = [entry for entry in a.binaries if Path(entry[0]).name.lower() not in unused_qt
+              and not Path(entry[0]).name.lower().startswith(('qt6qml', 'qt6quick', 'opencv_videoio_ffmpeg'))]
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='VisionShield',
           debug=False, strip=False, upx=False, console=False,
