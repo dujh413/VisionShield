@@ -15,6 +15,7 @@ from app_shell import Shell, Backend
 
 class FakeBackend(QObject):
     changed = Signal(str, str)
+    updated = Signal(dict)
     stopped = Signal()
 
     def __init__(self):
@@ -162,8 +163,9 @@ class ShellTests(unittest.TestCase):
         def inspect_dialog():
             dialog=self.app.activeModalWidget()
             descriptions.extend(label.text() for label in dialog.findChildren(QLabel))
-            buttons.extend(button for button in dialog.findChildren(QPushButton)
-                           if button.text().startswith(('局部保护','整窗保护','清除所选范围')))
+            buttons.extend(dialog.findChild(QPushButton, name)
+                           for name in ('selectLocalScope', 'selectWindowScope', 'textAction'))
+            descriptions.extend(button.toolTip() for button in buttons)
             self.assertEqual(len(buttons),3)
             self.assertTrue(all(not button.isEnabled() for button in buttons))
             dialog.reject()
@@ -178,7 +180,8 @@ class ShellTests(unittest.TestCase):
 
     def test_configured_scope_summary_and_reset_update_immediately(self):
         self.panel.save_profiles({'app':{'mode':'window'}})
-        self.assertIn('0 处局部、1 个整窗',self.panel.scope_summary.text())
+        self.assertIn('1 个已选范围',self.panel.scope_summary.text())
+        self.assertIn('0 处局部、1 个整窗',self.panel.scope_summary.toolTip())
         self.panel.save_profiles({})
         self.assertIn('自动按应用与内容保护',self.panel.scope_summary.text())
 
@@ -213,7 +216,7 @@ class ShellTests(unittest.TestCase):
         finally:extra.hide();extra.deleteLater();self.app.processEvents()
 
     def test_scope_buttons_save_pending_form_before_leaving_settings(self):
-        for prefix,whole in (('局部保护',False),('整窗保护',True)):
+        for prefix,whole in (('selectLocalScope',False),('selectWindowScope',True)):
             with self.subTest(prefix=prefix):
                 self.settings.setValue('shield_enabled',True)
                 self.settings.setValue('auto_enable',False)
@@ -222,8 +225,7 @@ class ShellTests(unittest.TestCase):
                     dialog.findChild(QCheckBox,'shield_enabled').setChecked(False)
                     for checkbox in dialog.findChildren(QCheckBox):
                         if checkbox.text()=='打开软件后自动启用防护':checkbox.setChecked(True)
-                    next(button for button in dialog.findChildren(QPushButton)
-                         if button.text().startswith(prefix)).click()
+                    dialog.findChild(QPushButton, prefix).click()
                 QTimer.singleShot(0,choose_dialog)
                 with patch.object(self.panel,'calibrate_scope') as choose:
                     self.panel.open_settings()
@@ -238,8 +240,7 @@ class ShellTests(unittest.TestCase):
             dialog=self.app.activeModalWidget()
             checkbox=dialog.findChild(QCheckBox,'shield_enabled')
             checkbox.setChecked(False)
-            next(button for button in dialog.findChildren(QPushButton)
-                 if button.text().startswith('清除所选范围')).click()
+            dialog.findChild(QPushButton, 'textAction').click()
             checkbox.setChecked(True)
             dialog.reject()
         QTimer.singleShot(0,clear_dialog)
@@ -257,7 +258,8 @@ class ShellTests(unittest.TestCase):
         reopened=Shell(QSettings(self.path,QSettings.IniFormat),FakeBackend(),tray_available=False)
         try:
             self.assertEqual(reopened.load_profiles(),{'app':{'mode':'window'}})
-            self.assertIn('软件重启后需',reopened.scope_summary.text())
+            self.assertIn('需重新选择',reopened.scope_summary.text())
+            self.assertIn('软件重启后需',reopened.scope_summary.toolTip())
         finally:
             reopened.hide();reopened.deleteLater();self.app.processEvents()
 
@@ -426,14 +428,57 @@ class ShellTests(unittest.TestCase):
             dialog=self.app.activeModalWidget()
             for checkbox in dialog.findChildren(QCheckBox):
                 checkbox.setChecked(True)
-            for button in dialog.findChildren(QPushButton):
-                if button.text()=='登记 / 更新机主':
-                    button.click();break
+            dialog.findChild(QPushButton, 'enrollOwner').click()
         QTimer.singleShot(0,register_dialog)
         with patch.object(self.panel,'register_owner') as register:
             self.panel.open_settings()
             register.assert_called_once()
         self.assertFalse(self.settings.value('auto_enable',False,type=bool))
+
+    def test_switch_click_and_preview_reflect_actual_backend_state(self):
+        self.panel.preview = True
+        self.panel.toggle.click()
+        self.assertFalse(self.panel.toggle.isChecked())
+        self.assertEqual(self.backend.starts, 0)
+        self.panel.preview = False
+        with patch('overlay_window.exclude_capture', side_effect=RuntimeError):
+            self.panel.toggle.click()
+        self.assertFalse(self.panel.toggle.isChecked())
+        with patch('overlay_window.exclude_capture'):
+            self.panel.toggle.click()
+        self.assertTrue(self.panel.toggle.isChecked())
+        self.backend.changed.emit('running', '模拟已启动')
+        self.panel.toggle.click()
+        self.assertFalse(self.panel.toggle.isChecked())
+        self.assertEqual(self.backend.stops, 1)
+
+    def test_identity_labels_require_backend_evidence_and_reset_on_pause(self):
+        self.backend.changed.emit('running', '模拟检测')
+        self.assertIn('等待', self.panel.owner_status.text())
+        self.assertNotIn('未检测到旁人', self.panel.bystander_status.text())
+        self.backend.updated.emit({'owner_verified': True, 'faces_count': 1})
+        self.assertEqual(self.panel.owner_status.text(), '机主已确认')
+        self.assertEqual(self.panel.bystander_status.text(), '当前未检测到旁人')
+        self.backend.updated.emit({'owner_verified': True, 'faces_count': 2})
+        self.assertIn('旁人', self.panel.bystander_status.text())
+        self.backend.updated.emit({'owner_verified': False, 'faces_count': 0})
+        self.assertIn('未检测到人脸', self.panel.bystander_status.text())
+        self.panel.set_state('paused')
+        self.assertIn('尚未启动', self.panel.owner_status.text())
+        self.assertFalse(self.panel.latest_status)
+
+    def test_settings_switches_keep_cancel_and_running_registration_boundaries(self):
+        self.panel.set_state('running', '模拟检测')
+        def inspect():
+            dialog = self.app.activeModalWidget()
+            self.assertFalse(dialog.findChild(QPushButton, 'enrollOwner').isEnabled())
+            dialog.findChild(QCheckBox, 'shield_enabled').click()
+            dialog.reject()
+        QTimer.singleShot(0, inspect)
+        with patch('overlay_window.exclude_capture'):
+            self.panel.open_settings()
+        self.assertTrue(self.settings.value('shield_enabled', True, type=bool))
+        self.assertTrue(self.panel.effect_input.slider.isEnabled())
 
 
 if __name__ == '__main__':

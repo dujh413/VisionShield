@@ -68,6 +68,22 @@ class EffectControlsTests(unittest.TestCase):
             self.assertGreater(slider.value(),2)
         finally:control.hide();control.deleteLater()
 
+    def test_segment_buttons_and_legacy_mode_stay_in_sync(self):
+        control=EffectControls('40');control.show()
+        try:
+            self.app.processEvents()
+            control.mode_buttons['block'].click()
+            self.assertEqual(control.to_text(),'遮挡')
+            self.assertFalse(control.slider.isEnabled())
+            control.mode_buttons['blur'].click()
+            self.assertEqual(control.to_text(),'40')
+            self.assertTrue(control.slider.isEnabled())
+            control.setText('遮挡')
+            self.assertTrue(control.mode_buttons['block'].isChecked())
+            control.set_shield_enabled(False)
+            self.assertTrue(all(not button.isEnabled() for button in control.mode_buttons.values()))
+        finally:control.hide();control.deleteLater()
+
 
 class ScopePickerTests(unittest.TestCase):
     @classmethod
