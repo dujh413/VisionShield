@@ -35,6 +35,7 @@
 - [发行与完整性记录](docs/公开下载与封装模板_20261007.md)
 - [仓库防护与维护](docs/仓库公开与维护.md)
 - [历史验证目录](docs/history/README.md)
+- [30秒产品概念视频工程](media/product-concept/README.md)
 
 ## 数据、反馈与许可
 
