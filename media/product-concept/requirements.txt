@@ -1,0 +1,5 @@
+numpy>=2.0,<3
+Pillow>=10,<13
+opencv-python>=4.10,<5
+PySide6>=6.8,<7
+imageio-ffmpeg==0.6.0

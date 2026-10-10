@@ -1,0 +1,16 @@
+{
+  "title": "VisionShield · 视界盾",
+  "duration": 30,
+  "fps": 30,
+  "width": 1920,
+  "height": 1080,
+  "scenes": [
+    {"start": 0, "end": 5.5, "eyebrow": "VISION SHIELD", "headline": ["专注眼前。", "隐私，在身边。"], "subline": "视界盾 · Windows 桌面防护"},
+    {"start": 5.5, "end": 11.5, "eyebrow": "AWARE. THEN PROTECT.", "headline": ["感知旁观风险。", "保护所选内容。"], "subline": "本地人脸检测 × 文字识别 × 风险联动"},
+    {"start": 11.5, "end": 18, "eyebrow": "YOUR SCREEN. YOUR CHOICE.", "headline": ["模糊的分寸，", "由你掌握。"], "subline": "滑动调节模糊程度 · 随时切换深色遮挡"},
+    {"start": 18, "end": 24, "eyebrow": "SET IT YOUR WAY.", "headline": ["你选择，", "它配合。"], "subline": "遮蔽、音效、弹窗，可独立组合"},
+    {"start": 24, "end": 30, "eyebrow": "VISION SHIELD", "headline": ["让专注，", "留在你的屏幕。"], "subline": "视界盾 · 本地处理，后台守护"}
+  ],
+  "notice": "产品概念演示 · 模拟状态与虚构内容 · 当前预览版",
+  "colors": {"paper": "#f4f5f1", "ink": "#182b23", "accent": "#24724f", "night": "#0d1915"}
+}
