@@ -234,6 +234,10 @@ captures/
 # Development artifacts and local workspace helpers
 test_artifacts/
 
+# Competition proposals and questionnaires are local-only materials.
+/docs/submissions/
+/docs/视界盾项目完整实施方案_场景创新赛道.md
+
 # Credentials and local sensitive exports
 *.pem
 *.key
