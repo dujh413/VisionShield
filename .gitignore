@@ -234,6 +234,8 @@ captures/
 # Development artifacts and local workspace helpers
 test_artifacts/
 
+/docs/submissions/
+
 # Credentials and local sensitive exports
 *.pem
 *.key
