@@ -234,6 +234,17 @@ captures/
 # Development artifacts and local workspace helpers
 test_artifacts/
 
+# Local-only historical reports, presentation sources and retired experiments.
+/docs/history/
+/docs/视界盾项目内容说明报告.md
+/docs/公开下载与封装模板_20261007.md
+/docs/仓库公开与维护.md
+/media/product-concept/
+/视界盾开发/check_environment.py
+/视界盾开发/face_test.py
+/视界盾开发/owner_test.py
+/视界盾开发/requirements-a.txt
+
 /docs/submissions/
 
 # Credentials and local sensitive exports
