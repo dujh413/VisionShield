@@ -19,8 +19,8 @@ jobs:
       PYTHONIOENCODING: utf-8
       OPENBLAS_NUM_THREADS: '1'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: '3.12'
       - name: Install isolated source-test dependencies
@@ -41,13 +41,13 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         shell: pwsh
         run: |
-          $taskArgs = @('packaging/cloud_release_check.py', '--output', 'test_artifacts/cloud-release')
+          $taskArgs = @('packaging/cloud_release_check.py', '--output', 'test_artifacts/cloud-release', '--check-models')
           if ($env:RELEASE_TAG) { $taskArgs += @('--tag', $env:RELEASE_TAG) }
           python @taskArgs
           if ($LASTEXITCODE -ne 0) { throw 'Release download or EXE smoke test failed' }
       - name: Keep only non-personal verification report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: windows-cloud-report
           path: test_artifacts/cloud-release/cloud-report.json

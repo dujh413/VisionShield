@@ -34,6 +34,7 @@
 - [后台运行与首次登记](docs/轻量后台软件设计.md)
 - [显示模式与指定范围](docs/动态桌面防护与显示模式.md)
 - [Windows 构建与验收](docs/Windows测试版打包说明.md)
+- [Windows云端测试与私有下载](docs/Windows云端测试.md)
 - [发行与完整性记录](docs/公开下载与封装模板_20261007.md)
 - [仓库防护与维护](docs/仓库公开与维护.md)
 - [历史验证目录](docs/history/README.md)

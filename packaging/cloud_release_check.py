@@ -154,12 +154,48 @@ def smoke(executable, root):
             process.wait(timeout=10)
 
 
+def model_inference(executable):
+    """Use downloaded public models with fictional text/blank faces, not a camera."""
+    repository = Path(__file__).resolve().parents[1]
+    sys.path[:0] = [str(repository/'视界盾桌面防护'), str(repository/'视界盾开发')]
+    import cv2
+    import numpy as np
+    import fast_ocr
+    from identity_test import load_models
+    from sensitive_rules import detect
+    resources = executable.parent/'_internal'
+    original = fast_ocr.desktop_root
+    try:
+        fast_ocr.desktop_root = lambda: resources/'视界盾桌面防护'
+        engine = fast_ocr.FastOCR(gpu=False)
+        image = np.full((220, 1000, 3), 255, dtype=np.uint8)
+        cv2.putText(image, 'Phone: 13600000000', (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.3, (0, 0, 0), 2)
+        cv2.putText(image, 'Email: demo@example.com', (30, 170), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 0, 0), 2)
+        lines = engine.recognize(image)
+        categories = {category for hit in detect(lines) for category in hit['categories']}
+        if not {'手机号', '邮箱'}.issubset(categories):
+            raise RuntimeError('Fictional OCR sample did not yield both expected sensitive categories')
+        detector, recognizer = load_models(resources/'视界盾开发')
+        detector.detect(np.zeros((480, 640, 3), dtype=np.uint8))
+        feature = recognizer.feature(np.zeros((112, 112, 3), dtype=np.uint8))
+        if not feature.size or not np.isfinite(feature).all():
+            raise RuntimeError('Face embedding model did not produce finite output')
+        return {'synthetic_only': True, 'ocr_phone_and_email': True,
+                'ocr_cpu_provider': not engine.use_dml,
+                'yunet_blank_inference': True, 'sface_finite_output': True,
+                'face_engine': getattr(detector, 'backend', 'opencv-cpu'),
+                'real_person_detection_tested': False}
+    finally:
+        fast_ocr.desktop_root = original
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repository', default=os.environ.get('GITHUB_REPOSITORY', 'dujh413/VisionShield'))
     parser.add_argument('--tag')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--download-only', action='store_true')
+    parser.add_argument('--check-models', action='store_true', help='Synthetic CPU inference using repository code and downloaded models')
     args = parser.parse_args()
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', args.repository):
         raise ValueError('Invalid repository')
@@ -215,6 +251,8 @@ def main():
                 raise ValueError('Bundled model does not match the embedded manifest')
         report['release_source_commit'] = manifest['source_commit']
         report['public_models_checked'] = len(manifest['public_models'])
+        if args.check_models:
+            report['model_inference'] = model_inference(executable)
         if not args.download_only:
             report['startup'] = smoke(executable, root)
         report['passed'] = True
