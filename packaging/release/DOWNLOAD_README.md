@@ -1,6 +1,6 @@
 # 视界盾 · VisionShield 下载
 
-面向公共学习与办公场景的 Windows 屏幕内容防护软件。源码仓库现已公开，提供软件下载、使用说明和可复用封装模板。
+面向公共学习与办公场景的 Windows 屏幕内容防护软件。源码仓库及Release现为私有，仅账号所有者及已接受邀请的成员可访问。
 
 ## 下载 v0.1.0-preview.3
 
@@ -11,6 +11,8 @@
 - [发行说明与附件列表](https://github.com/dujh413/VisionShield/releases/tag/v0.1.0-preview.3)
 
 在 Release 的 **Assets** 内选择带 `Windows-x64` 的ZIP。GitHub自动生成的Source code不是Windows软件包。此版本为预览版，发布状态和可下载附件以Release页面为准。
+
+下载前请登录有仓库访问权限的GitHub账号，并接受仓库邀请。未登录或没有权限时返回404是正常的访问保护，并非文件丢失。当前发行版属于pre-release，自动化下载应显式选择版本或从非草稿发行列表选择，不使用仅查正式版的`releases/latest`接口。
 
 ## 使用
 

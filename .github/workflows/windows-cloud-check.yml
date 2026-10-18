@@ -1,0 +1,55 @@
+name: Windows cloud verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (blank selects the newest non-draft release, including previews)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    env:
+      PYTHONIOENCODING: utf-8
+      OPENBLAS_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated source-test dependencies
+        run: python -m pip install -r packaging/requirements-cloud.txt
+      - name: Source regression tests without camera or personal data
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          python -m unittest discover -s './视界盾桌面防护' -p 'test_*.py'
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop regressions failed' }
+          python -m unittest discover -s './视界盾开发' -p 'test_*.py'
+          if ($LASTEXITCODE -ne 0) { throw 'Identity regressions failed' }
+          python -m unittest discover -s packaging -p 'test_cloud_release_check.py'
+          if ($LASTEXITCODE -ne 0) { throw 'Private download regressions failed' }
+      - name: Download private release, verify hashes and launch packaged preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: pwsh
+        run: |
+          $taskArgs = @('packaging/cloud_release_check.py', '--output', 'test_artifacts/cloud-release')
+          if ($env:RELEASE_TAG) { $taskArgs += @('--tag', $env:RELEASE_TAG) }
+          python @taskArgs
+          if ($LASTEXITCODE -ne 0) { throw 'Release download or EXE smoke test failed' }
+      - name: Keep only non-personal verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-cloud-report
+          path: test_artifacts/cloud-release/cloud-report.json
+          if-no-files-found: warn
+          retention-days: 14
