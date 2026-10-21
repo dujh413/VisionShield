@@ -34,8 +34,8 @@ jobs:
           python -m unittest discover -s './视界盾开发' -p 'test_*.py'
           if ($LASTEXITCODE -ne 0) { throw 'Identity regressions failed' }
           python -m unittest discover -s packaging -p 'test_cloud_release_check.py'
-          if ($LASTEXITCODE -ne 0) { throw 'Private download regressions failed' }
-      - name: Download private release, verify hashes and launch packaged preview
+          if ($LASTEXITCODE -ne 0) { throw 'Download regressions failed' }
+      - name: Download release, verify hashes and launch packaged preview
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}

@@ -245,7 +245,9 @@ test_artifacts/
 /视界盾开发/owner_test.py
 /视界盾开发/requirements-a.txt
 
+# Local working documents are not part of the software.
 /docs/submissions/
+/docs/*实施方案*
 
 # Credentials and local sensitive exports
 *.pem

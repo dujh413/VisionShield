@@ -1,18 +1,18 @@
 # 视界盾 · VisionShield 下载
 
-面向公共学习与办公场景的 Windows 屏幕内容防护软件。源码仓库及Release现为私有，仅账号所有者及已接受邀请的成员可访问。
+面向公共学习与办公场景的 Windows 屏幕内容防护软件。源码与软件通过公开仓库及Release提供，下载无需协作者权限。
 
-## 下载 v0.1.0-preview.3
+## 下载 v0.1.0
 
-- [Windows x64 软件包](https://github.com/dujh413/VisionShield/releases/download/v0.1.0-preview.3/VisionShield-Windows-x64-v0.1.0-preview.3.zip)
-- [封装模板](https://github.com/dujh413/VisionShield/releases/download/v0.1.0-preview.3/VisionShield-PackagingTemplate-v0.1.0-preview.3.zip)
-- [第三方库对应源码](https://github.com/dujh413/VisionShield/releases/download/v0.1.0-preview.3/VisionShield-ThirdParty-Sources-v0.1.0-preview.3.zip)
-- [SHA256 校验文件](https://github.com/dujh413/VisionShield/releases/download/v0.1.0-preview.3/VisionShield-v0.1.0-preview.3-SHA256SUMS.txt)
-- [发行说明与附件列表](https://github.com/dujh413/VisionShield/releases/tag/v0.1.0-preview.3)
+- [Windows x64 软件包](https://github.com/dujh413/VisionShield/releases/download/v0.1.0/VisionShield-Windows-x64-v0.1.0.zip)
+- [封装模板](https://github.com/dujh413/VisionShield/releases/download/v0.1.0/VisionShield-PackagingTemplate-v0.1.0.zip)
+- [第三方库对应源码](https://github.com/dujh413/VisionShield/releases/download/v0.1.0/VisionShield-ThirdParty-Sources-v0.1.0.zip)
+- [SHA256 校验文件](https://github.com/dujh413/VisionShield/releases/download/v0.1.0/VisionShield-v0.1.0-SHA256SUMS.txt)
+- [发行说明与附件列表](https://github.com/dujh413/VisionShield/releases/tag/v0.1.0)
 
-在 Release 的 **Assets** 内选择带 `Windows-x64` 的ZIP。GitHub自动生成的Source code不是Windows软件包。此版本为预览版，发布状态和可下载附件以Release页面为准。
+在 Release 的 **Assets** 内选择带 `Windows-x64` 的ZIP。GitHub自动生成的Source code不是Windows软件包。版本与可下载附件以Release页面为准。
 
-下载前请登录有仓库访问权限的GitHub账号，并接受仓库邀请。未登录或没有权限时返回404是正常的访问保护，并非文件丢失。当前发行版属于pre-release，自动化下载应显式选择版本或从非草稿发行列表选择，不使用仅查正式版的`releases/latest`接口。
+公开下载无需登录或接受邀请；自动化工具可使用`releases/latest`获取最新正式发行。
 
 ## 使用
 
@@ -22,9 +22,9 @@
 
 正常运行不保存摄像头画面、桌面截图或聊天原文；本人模板由使用者在自己的电脑上生成，不随软件提供。
 
-## 预览版范围
+## 适用范围
 
-主要验证主显示器的可见文字保护。严重模糊、遮挡和远处小脸仍可能漏检或误检，不能保证全部场景500ms响应。完整后端内存仍偏高，新电脑兼容及持续双人效果还需要更多实测。该版本未完成正式发布所需的全部验收。
+主要验证主显示器的可见文字保护。严重模糊、遮挡和远处小脸仍可能漏检或误检，不能保证全部场景500ms响应。完整后端内存仍偏高，新电脑兼容及持续双人效果还需要更多实测。设备与场景适用性以实际验证为准。
 
 包内提供使用说明、版本信息、公共模型摘要、第三方许可；Qt/PySide6及GEOS对应源码在同一Release提供。模板脚本采用MIT许可，依赖各自许可不变，其他业务源码不因模板许可而自动授权。
 
