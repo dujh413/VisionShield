@@ -20,6 +20,7 @@ from content_state import ContentState
 from frame_scheduler import FrameScheduler
 from mask_effect import parse_effect
 from performance_log import PerformanceLog
+from local_ocr_motion import LocalOcrMotion
 from runtime_paths import desktop_root, records_directory
 
 
@@ -37,6 +38,7 @@ class ControlPanel(QWidget):
         self.app_profiles = {}
         self.local_ocr_enabled = False
         self.analysis_regions = None
+        self.local_motion = LocalOcrMotion()
         self.region_tracker = None
         self.region_status = '未设置追踪区域'
         self.setWindowTitle('视界盾 · 主屏自动防护')
@@ -117,6 +119,7 @@ class ControlPanel(QWidget):
             self.error, self.ready = None, False
             self.content = ContentState(capture_timeout=1.5)
             self.scheduler = FrameScheduler()
+            self.local_motion = LocalOcrMotion()
             self.last_risk, self.alert_message, self.last_ocr_finished = False, None, None
             records = records_directory()
             records.mkdir(parents=True, exist_ok=True)
@@ -137,11 +140,13 @@ class ControlPanel(QWidget):
         local_ocr = value.get('local_ocr_enabled', self.local_ocr_enabled)
         if type(local_ocr) is bool and local_ocr != self.local_ocr_enabled:
             self.local_ocr_enabled = local_ocr
+            self.local_motion = LocalOcrMotion()
             if self.overlay is not None:self.overlay.set_masks([],full=False)
         if isinstance(value.get('app_profiles'), dict):
             new_profiles=valid_profiles(value['app_profiles'])
             if new_profiles!=self.app_profiles and self.overlay is not None:
                 self.overlay.set_masks([],full=False)
+            if new_profiles!=self.app_profiles:self.local_motion = LocalOcrMotion()
             self.app_profiles = new_profiles
         enabled = value.get('shield_enabled', self.shield_enabled)
         if not isinstance(enabled, bool):
@@ -266,6 +271,7 @@ class ControlPanel(QWidget):
         self.hits = []
         self.content = ContentState(capture_timeout=1.5)
         self.scheduler = FrameScheduler()
+        self.local_motion = LocalOcrMotion()
         self.ready = False
         self.last_ocr_finished = None
         self.protecting = self.overlay is not None
@@ -312,6 +318,7 @@ class ControlPanel(QWidget):
                     self.region_tracker=RegionTracker()
                 scopes=self.region_tracker.resolve(self.app_profiles,windows,self.latest.image,
                     (self.latest.monitor_rect['left'],self.latest.monitor_rect['top']),now)
+            self.local_motion.locate(windows,self.app_profiles,self.local_ocr_enabled,now)
             regions=(recognition_regions(windows,self.app_profiles,scopes,self.latest.image.shape)
                      if self.latest is not None and self.local_ocr_enabled and self.app_profiles else None)
             if regions!=self.analysis_regions:
@@ -321,7 +328,8 @@ class ControlPanel(QWidget):
                 self.analysis_regions=regions
                 self.scheduler=FrameScheduler()
             # 必须在poll分发待处理请求之前替换为当前帧，避免再序列化旧帧。
-            if self.ready and not self.error and self.scheduler.due(self.latest, now):
+            if (self.ready and not self.error and self.scheduler.due(self.latest, now)
+                    and self.local_motion.allows(self.latest.captured_at)):
                 analysis_frame=replace(self.latest,ocr_regions=regions) if regions is not None else self.latest
                 if self.worker.submit(analysis_frame):
                     self.scheduler.submitted(self.latest, now)
@@ -337,6 +345,7 @@ class ControlPanel(QWidget):
                     result_regions=item.get('analysis_regions')
                     result_regions=None if result_regions is None else tuple(tuple(box) for box in result_regions)
                     if result_regions!=self.analysis_regions:continue
+                    if not self.local_motion.allows(item['captured_at']):continue
                     received = time.monotonic()
                     index_started = time.monotonic()
                     accepted = self.content.accept(item, received, self.semantic)
@@ -352,6 +361,8 @@ class ControlPanel(QWidget):
                             'index_ms':index_ms})
             now = time.monotonic()
             view = self.content.view(now)
+            self.local_motion.remember(self.content,now)
+            motion_rectangles = self.local_motion.rectangles(self.latest,now)
             self.hits = view['hits']
             self.valid_image = self.content.result['image'] if view['coordinates_valid'] else None
             if not self.worker.process.is_alive():
@@ -389,7 +400,7 @@ class ControlPanel(QWidget):
                         local_ocr_enabled=self.local_ocr_enabled, render_scopes=render_rectangles,
                         render_bindings=render_bindings,
                         sensitive_rectangles=[rect_of(hit['polygon']) for hit in view['hits']
-                            if any(category!='无法确定' for category in hit['categories'])])
+                            if any(category!='无法确定' for category in hit['categories'])]+motion_rectangles)
                     if self.local_ocr_enabled and not rectangles and not full and not view['full']:
                         local_ocr_clear=bool(application_masks(windows,[],True,self.app_profiles,resolved=scopes)[0])
                     scoped = bool(windows)

@@ -129,6 +129,41 @@ class ControlSafetyTests(unittest.TestCase):
         self.assertEqual(p.overlay.set_masks.call_args.args[0],[])
         self.assertIn('请暂停后重新框选',p.status.text())
 
+    def test_local_sensitive_boxes_follow_window_drag_with_lagging_capture_and_no_ocr(self):
+        p=self.panel
+        p.app_profiles={'test':{'mode':'region','region':[0,0,1,1],'binding':{'handle':1,'pid':1}}}
+        p.apply_preferences({'local_ocr_enabled':True})
+        p.camera.risk.return_value=(True,'模拟风险')
+        p.latest.frame_id=2;p.content.observe(p.latest)
+        windows=[{'key':'test','handle':1,'pid':1,'mode':'lines',
+                  'rect':(0,0,64,64),'client':(0,0,64,64)}]
+        p.worker.poll.return_value=[{'frame_id':2,'captured_at':self.now,'image':p.latest.image,
+            'lines':[{'text':'demo@example.com','confidence':.99,
+                      'polygon':[[10,10],[30,10],[30,20],[10,20]]}],
+            'analysis_regions':[(0,0,64,64)],'unknown_regions':[],'elapsed_ms':10}]
+        with patch('app_scope.window_inventory',side_effect=lambda monitor:windows):
+            self.tick();p.worker.poll.return_value=[]
+            self.assertEqual(p.overlay.set_masks.call_args.args[0],[(10.,10.,20.,10.)])
+            initial_binding=next(iter(p.overlay.set_masks.call_args.kwargs['render_bindings'].values()))
+            calls=p.worker.submit.call_count
+            for step in range(1,41):
+                self.now+=.02
+                windows[0].update(rect=(step,0,64,64),client=(step,0,64,64))
+                self.tick()
+                self.assertIsNone(p.error)
+                self.assertEqual(p.overlay.set_masks.call_args.args[0],[(10.+step,10.,20.,10.)])
+                self.assertEqual(next(iter(p.overlay.set_masks.call_args.kwargs['render_bindings'].values())),initial_binding)
+            self.assertEqual(p.worker.submit.call_count,calls)
+            # A genuinely new post-drag frame enables OCR again. Changed text
+            # removes the carried coordinates, never the entire selected area.
+            self.now+=.1
+            changed=p.latest.image.copy();changed[11,51]=255
+            p.latest=Frame(3,self.now,p.latest.monitor_rect,changed)
+            p.content.observe(p.latest)
+            self.tick()
+            self.assertGreater(p.worker.submit.call_count,calls)
+            self.assertEqual(p.overlay.set_masks.call_args.args[0],[])
+
     def test_local_ocr_sensitive_result_is_clipped_and_pending_content_stays_clear(self):
         p=self.panel
         p.app_profiles={'test':{'mode':'region','region':[0,0,.5,.5],'binding':{'handle':1,'pid':1}}}

@@ -186,10 +186,11 @@ def application_masks(windows, rectangles, uncertain, profiles=None, resolved=No
         # Render against stable protection bounds. Foreground motion changes
         # only the final visible clip, not blur job geometry or GPU ownership.
         if render_scopes is not None:render_scopes.extend(selected)
-        if render_bindings is not None and mode in ('window','region') and not local_ocr:
+        if render_bindings is not None and mode in ('window','region'):
             for selected_rect in selected:
                 render_bindings[selected_rect]=(window['key'],window['handle'],window['pid'],
-                    repr(profile),tuple(window['client'][2:]))
+                    repr(profile),tuple(window['client'][2:]),
+                    (selected_rect[0]-scope[0],selected_rect[1]-scope[1],*selected_rect[2:]) if local_ocr else None)
         # 程序自身始终保持可见，不能依赖Qt置顶窗口的瞬时排序。
         for cover in covers+excluded:
             selected=[part for candidate in selected for part in subtract(candidate,cover)]
