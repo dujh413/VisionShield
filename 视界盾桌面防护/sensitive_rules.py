@@ -36,8 +36,9 @@ def nearby(a, b):
 
 def detect(lines, semantic=None):
     hits = {}
-    def add(index, category, reason):
+    def add(index, category, reason, standalone=False):
         hit = hits.setdefault(index, {'line_index': index, 'polygon': lines[index]['polygon'], 'categories': [], 'reasons': []})
+        if standalone:hit['standalone']=True
         if category not in hit['categories']:
             hit['categories'].append(category)
             hit['reasons'].append(reason)
@@ -47,13 +48,13 @@ def detect(lines, semantic=None):
     for i, line in enumerate(lines):
         text = normalize(line['text'])
         compact = re.sub(r'\s+', '', text)
-        if re.search(r'(?<!\d)1[3-9]\d{9}(?!\d)', compact):
-            add(i, '手机号', '手机号格式')
-        if re.search(r'[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}', compact):
-            add(i, '邮箱', '邮箱格式')
+        if re.search(r'(?<!\d)(?:(?:\+86|0086)[-.]?)?1[3-9]\d[-.]?\d{4}[-.]?\d{4}(?!\d)', compact):
+            add(i, '手机号', '手机号格式', standalone=True)
+        if re.search(r'[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}', compact.replace('。','.')):
+            add(i, '邮箱', '邮箱格式', standalone=True)
         for number in re.findall(r'(?<!\d)\d{17}[\dXx](?!\d)', compact):
             if valid_id(number):
-                add(i, '身份证', '格式与校验码')
+                add(i, '身份证', '格式与校验码', standalone=True)
         for label, category in labels.items():
             # “讨论如何修改密码”不是凭证；要求赋值语境或独立标签。
             if text == label or re.search(re.escape(label)+r'\s*(?:[:：]|是|为)', text):

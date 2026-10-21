@@ -4,6 +4,7 @@ from datetime import datetime
 import multiprocessing
 import sys
 import time
+from dataclasses import replace
 
 from PySide6.QtCore import QTimer, QSignalBlocker
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget
@@ -35,6 +36,7 @@ class ControlPanel(QWidget):
         self.probe_active = False
         self.app_profiles = {}
         self.local_ocr_enabled = False
+        self.analysis_regions = None
         self.region_tracker = None
         self.region_status = '未设置追踪区域'
         self.setWindowTitle('视界盾 · 主屏自动防护')
@@ -301,9 +303,27 @@ class ControlPanel(QWidget):
                         raise RuntimeError(self.error)
                     self.latest = frame
                     self.content.observe(frame)
+            windows=[];scopes={}
+            if self.latest is not None and self.latest.monitor_rect:
+                from app_scope import application_masks, window_inventory, profile_status, recognition_regions
+                windows=window_inventory(self.latest.monitor_rect)
+                if self.region_tracker is None:
+                    from region_tracker import RegionTracker
+                    self.region_tracker=RegionTracker()
+                scopes=self.region_tracker.resolve(self.app_profiles,windows,self.latest.image,
+                    (self.latest.monitor_rect['left'],self.latest.monitor_rect['top']),now)
+            regions=(recognition_regions(windows,self.app_profiles,scopes,self.latest.image.shape)
+                     if self.latest is not None and self.local_ocr_enabled and self.app_profiles else None)
+            if regions!=self.analysis_regions:
+                if self.analysis_regions is not None:
+                    self.content=ContentState(capture_timeout=1.5)
+                    if self.latest is not None:self.content.observe(self.latest)
+                self.analysis_regions=regions
+                self.scheduler=FrameScheduler()
             # 必须在poll分发待处理请求之前替换为当前帧，避免再序列化旧帧。
             if self.ready and not self.error and self.scheduler.due(self.latest, now):
-                if self.worker.submit(self.latest):
+                analysis_frame=replace(self.latest,ocr_regions=regions) if regions is not None else self.latest
+                if self.worker.submit(analysis_frame):
                     self.scheduler.submitted(self.latest, now)
                     self.content.mark_submitted(now)
             for item in self.worker.poll():
@@ -314,6 +334,9 @@ class ControlPanel(QWidget):
                 elif 'error' in item:
                     self.error = 'OCR异常：'+item['error']
                 elif 'lines' in item:
+                    result_regions=item.get('analysis_regions')
+                    result_regions=None if result_regions is None else tuple(tuple(box) for box in result_regions)
+                    if result_regions!=self.analysis_regions:continue
                     received = time.monotonic()
                     index_started = time.monotonic()
                     accepted = self.content.accept(item, received, self.semantic)
@@ -360,13 +383,6 @@ class ControlPanel(QWidget):
             scoped = False
             local_ocr_clear = False
             if self.latest is not None and self.latest.monitor_rect:
-                from app_scope import application_masks, window_inventory, profile_status
-                windows = window_inventory(self.latest.monitor_rect)
-                if self.region_tracker is None:
-                    from region_tracker import RegionTracker
-                    self.region_tracker = RegionTracker()
-                scopes=self.region_tracker.resolve(self.app_profiles,windows,self.latest.image,
-                    (self.latest.monitor_rect['left'],self.latest.monitor_rect['top']),now)
                 self.region_status = profile_status(self.app_profiles,windows,scopes)
                 if protecting:
                     rectangles, full = application_masks(windows, rectangles, full, self.app_profiles, resolved=scopes,
@@ -394,12 +410,16 @@ class ControlPanel(QWidget):
             if protecting and render_rectangles:self.overlay.show()
             elif self.overlay.isVisible():self.overlay.hide()
             state = ('检测异常 · 保持指定范围策略' if self.error else '应用区域保护' if self.protecting else
+                     '选区未定位 · 请暂停后重新框选' if protecting and self.local_ocr_enabled and self.app_profiles and self.analysis_regions==() else
                      '保护范围暂被其他窗口遮挡' if protecting and render_rectangles else
-                     '等待敏感文字识别 · 选区保持清晰' if protecting and self.local_ocr_enabled and view['full'] else
+                     '等待敏感文字识别 · 选区保持清晰' if protecting and self.local_ocr_enabled and
+                        (view['full'] or view.get('unknown_regions',0)) else
                      '未命中敏感内容 · 继续检测' if local_ocr_clear else '保护范围暂不可用' if protecting else '正常显示')
             if not self.drawing_enabled():
                 state = '仅检测与提示（不遮蔽）' + (' · 检测异常' if self.error else ' · 存在风险' if risk_active else '')
-            self.status.setText(f'{state} · {reason}\nOCR：'+('异常' if self.error else '已就绪' if self.ready else '加载中'))
+            read_lines=len(self.content.result['lines']) if self.content.result else 0
+            self.status.setText(f'{state} · {reason}\nOCR：'+('异常' if self.error else
+                f'已读取{read_lines}行，有效敏感{sum(any(c!="无法确定" for c in h["categories"]) for h in self.hits)}条' if self.ready else '加载中'))
             self.detail.setText(f'有效敏感行：{len(self.hits)}；{self.effect.description}；范围：主显示器\n' +
                                 ('实验语义已启用（小样本，需独立评估）' if self.semantic else '规则模式；尚不能覆盖全部私人聊天语义'))
             if protecting or self.app_profiles:self.status.setText(self.status.text()+'\n'+self.region_status)

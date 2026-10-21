@@ -124,6 +124,17 @@ def region_scope(profile, window):
     return intersect((left,top,max(0,right-left),max(0,bottom-top)),window['rect'])
 
 
+def recognition_regions(windows, profiles, resolved, shape):
+    """Only user-selected local scopes enter OCR; no screen fallback on loss."""
+    local={key:profile for key,profile in profiles.items() if profile.get('mode')!='window'}
+    if not local:return ()
+    scopes=[]
+    application_masks(windows,[],True,local,resolved,render_scopes=scopes)
+    from incremental_regions import padded
+    return tuple(sorted({padded((x,y,x+width,y+height),shape,0)
+                         for x,y,width,height in scopes}))
+
+
 def application_masks(windows, rectangles, uncertain, profiles=None, resolved=None,
                       local_ocr_enabled=False, render_scopes=None, render_bindings=None,
                       sensitive_rectangles=None):

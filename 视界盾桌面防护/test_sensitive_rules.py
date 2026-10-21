@@ -14,6 +14,14 @@ class SensitiveTests(unittest.TestCase):
     def test_phone_email_and_fullwidth(self):
         self.assertIn('手机号',categories([line('１３８００１３８０００')]))
         self.assertIn('邮箱',categories([line('demo@example.com')]))
+        self.assertIn('邮箱',categories([line('demo ＠ example。com')]))
+
+    def test_phone_separators_and_non_phone_boundaries(self):
+        for value in ('138-0013-8000','138.0013.8000','138 0013 8000','１３８－００１３－８０００',
+                      '+8613800138000','008613800138000','+86 138-0013-8000'):
+            self.assertIn('手机号',categories([line(value)]))
+        for value in ('2138001380009','138-001-38000','2026-10-21'):
+            self.assertNotIn('手机号',categories([line(value)]))
 
     def test_plain_numbers_not_code(self):
         self.assertEqual(detect([line('今天买了123456份测试材料')]),[])

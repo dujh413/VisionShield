@@ -2,7 +2,7 @@
 import math
 import numpy as np
 from content_index import ContentIndex, _ExactDifference, line_context
-from incremental_regions import bounds, intersects, merge_boxes, regions_from_mask
+from incremental_regions import bounds, intersects, merge_boxes, regions_from_mask, padded
 from region_geometry import rectangles, area_ratio
 from sensitive_rules import detect, rect_of
 
@@ -49,13 +49,21 @@ class ContentState:
             if (len(box) != 4 or not all(math.isfinite(float(v)) for v in box)
                     or not 0 <= box[0] < box[2] <= width or not 0 <= box[1] < box[3] <= height):
                 raise ValueError('Invalid OCR coverage rectangle')
-        if not lines and not unknown:
+        if not lines and not unknown and item.get('analysis_regions') is None:
             unknown = [(0, 0, width, height)]
         # Geometry is stable across cached OCR results; classification always
         # uses the new text. One precise difference serves all ROI checks.
         contextual = self._geometry._with_context(lines, image.shape)
         line_bounds = [bounds(line) for line in contextual]
         contexts = [line_context(line, image.shape) for line in contextual]
+        hits = detect(contextual, semantic)
+        # Direct phone/email/verified-ID matches depend on their own pixels;
+        # cursor activity nearby must not erase an unchanged sensitive line.
+        # Label-linked values keep their complete contextual dependency.
+        for hit in hits:
+            if hit.get('standalone'):
+                index=hit['line_index']
+                contexts[index]=padded(line_bounds[index],image.shape,0)
         difference = _ExactDifference(image, self.latest.image, self._geometry.tile, self._geometry.tiles)
         dependencies = list(zip(line_bounds, contexts))
         if self.result is not None and self.result['image'].shape == image.shape:
@@ -66,7 +74,6 @@ class ContentState:
                                 if difference.changed(context)
                                 or any(intersects(context, box) for box in unknown))
         dependencies = list(dict.fromkeys(dependencies))
-        hits = detect(contextual, semantic)
         self.result = {**item, 'lines': contextual, 'unknown_regions': unknown, 'hits': hits}
         self.result_frame_id = frame_id
         self._line_bounds, self._contexts, self._dependencies = line_bounds, contexts, dependencies
@@ -84,6 +91,10 @@ class ContentState:
         changes = (regions_from_mask(difference.mask, self.latest.image.shape, padding=6)
                    if difference.mask is not None else [])
         lines = self.result['lines']
+        direct_valid={hit['line_index'] for hit in self.result['hits'] if hit.get('standalone')
+                      and not difference.changed(padded(self._line_bounds[hit['line_index']],self.latest.image.shape,0))
+                      and not any(intersects(self._line_bounds[hit['line_index']],box)
+                                  for box in self.result['unknown_regions'])}
         unresolved = self.result['unknown_regions'] + changes
         dependent = {i for i, context in enumerate(self._contexts)
                      if difference.changed(context) or any(intersects(context, box) for box in unresolved)}
@@ -100,9 +111,10 @@ class ContentState:
                 break
             dependent.update(additional)
             self.unknown = merge_boxes(self.unknown + [self._line_bounds[i] for i in additional])
-        self.hits = [hit for hit in self.result['hits'] if hit['line_index'] not in dependent
-                     and not any(intersects(self._line_bounds[hit['line_index']], b) for b in self.unknown)]
-        self.valid_lines = sum(i not in dependent for i in range(len(lines)))
+        self.hits = [hit for hit in self.result['hits'] if hit['line_index'] in direct_valid or
+                     (hit['line_index'] not in dependent and
+                      not any(intersects(self._line_bounds[hit['line_index']], b) for b in self.unknown))]
+        self.valid_lines = sum(i not in dependent or i in direct_valid for i in range(len(lines)))
         self.full_unknown = area_ratio(self.unknown, self.latest.image) >= .6 or len(self.unknown) > 32
 
     def view(self, now):

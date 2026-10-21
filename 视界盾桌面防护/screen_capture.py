@@ -23,6 +23,7 @@ class Frame:
     image: np.ndarray
     capture_ms: float = 0.0
     submitted_at: float = 0.0
+    ocr_regions: tuple | None = None  # physical xyxy; None=screen, ()=no valid scope
 
 
 class ScreenCapture:

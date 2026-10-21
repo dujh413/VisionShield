@@ -8,7 +8,7 @@ import queue
 import shutil
 import time
 from dataclasses import replace
-from incremental_ocr import IncrementalOCR
+from incremental_ocr import ScopedOCR
 
 
 MODEL_NAMES = ('PP-OCRv5_mobile_det', 'PP-OCRv5_mobile_rec')
@@ -117,7 +117,7 @@ def process_main(root, inputs, outputs, backend='fast'):
             providers={'backend':'paddle_cpu'}
             timings, batches = [], []
         outputs.put({'ready': True,'backend':backend,'providers':providers})
-        incremental = IncrementalOCR()
+        incremental = ScopedOCR()
         while True:
             frame = inputs.get()
             if frame is None:
@@ -125,12 +125,13 @@ def process_main(root, inputs, outputs, backend='fast'):
             started = time.monotonic()
             timings.clear()
             batches.clear()
-            lines, metrics = incremental.run(frame.image, infer)
+            lines, metrics = incremental.run(frame.image, infer,frame.ocr_regions)
             put_latest(outputs, {'frame_id': frame.frame_id, 'captured_at': frame.captured_at,
                                  'ocr_finished_at': time.monotonic(), 'image': frame.image,
                                  'lines': lines, 'cached': metrics['mode']=='cached',
                                  'mode': metrics['mode'], 'area_ratio': metrics['area_ratio'],
                                  'unknown_regions': metrics.get('unknown_regions', []),
+                                 'analysis_regions':metrics.get('analysis_regions'),
                                  'regions_count': metrics.get('regions_count', 1),
                                  'diff_ms': metrics.get('diff_ms'),
                                  'capture_ms': frame.capture_ms,

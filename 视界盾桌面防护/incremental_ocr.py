@@ -112,3 +112,36 @@ class IncrementalOCR:
         return lines, {'mode': mode, 'area_ratio': ratio,
                        'regions_count': regions_count, 'diff_ms': diff_ms,
                        'unknown_regions': list(self.unknown_regions)}
+
+
+class ScopedOCR:
+    """Bounded per-selection caches; preserve native text size and global boxes."""
+    def __init__(self):
+        self.full=IncrementalOCR()
+        self.selected={}
+
+    def run(self,image,recognize,regions=None):
+        if regions is None:
+            self.selected.clear()
+            if self.full is None:self.full=IncrementalOCR()
+            return self.full.run(image,recognize)
+        if len(regions)>20:raise ValueError('too many OCR selections')
+        for box in regions:
+            if (len(box)!=4 or any(type(v) is not int for v in box) or
+                    not 0<=box[0]<box[2]<=image.shape[1] or not 0<=box[1]<box[3]<=image.shape[0]):
+                raise ValueError('invalid OCR selection')
+        self.full=None
+        self.selected={box:self.selected.get(box) or IncrementalOCR() for box in regions}
+        lines=[];unknown=[];diff_ms=0.;area=0
+        for box,cache in self.selected.items():
+            x1,y1,x2,y2=box
+            crop=image[y1:y2,x1:x2].copy()
+            fresh,metrics=cache.run(crop,recognize)
+            lines.extend({**line,'polygon':[[float(x)+x1,float(y)+y1] for x,y in line['polygon']]}
+                         for line in fresh)
+            unknown.extend((x+x1,y+y1,right+x1,bottom+y1)
+                           for x,y,right,bottom in metrics['unknown_regions'])
+            diff_ms+=metrics['diff_ms'];area+=(x2-x1)*(y2-y1)
+        return lines,{'mode':'selected','area_ratio':area/(image.shape[0]*image.shape[1]),
+                      'regions_count':len(regions),'diff_ms':diff_ms,
+                      'unknown_regions':merge_boxes(unknown),'analysis_regions':list(regions)}

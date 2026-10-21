@@ -10,6 +10,16 @@ def line(text, x=800, y=800):
 
 
 class ContentTests(unittest.TestCase):
+    def test_nearby_blinking_cursor_does_not_erase_direct_phone_or_email(self):
+        for text in ('13800138000','demo@example.com'):
+            with self.subTest(text=text):
+                self.setUp()
+                self.state.accept(self.result([line(text,x=100,y=100)]),0.)
+                for identifier,(x,y) in enumerate(((285,110),(310,130),(100,125)),2):
+                    changed=self.image.copy();changed[y,x]=255
+                    self.state.observe(SimpleNamespace(image=changed,frame_id=identifier,captured_at=.1))
+                    self.assertEqual(len(self.state.view(.1)['hits']),1)
+
     def setUp(self):
         self.image = np.zeros((1000,1000,3), dtype=np.uint8)
         self.state = ContentState()

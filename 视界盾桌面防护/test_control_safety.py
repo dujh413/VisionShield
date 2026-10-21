@@ -104,6 +104,31 @@ class ControlSafetyTests(unittest.TestCase):
         self.tick()
         self.assertTrue(p.protecting)
 
+    def test_local_ocr_submits_only_bound_selection_and_rejects_previous_scope_result(self):
+        p=self.panel
+        p.app_profiles={'test':{'mode':'region','region':[0,0,.5,.5],'binding':{'handle':1,'pid':1}}}
+        p.apply_preferences({'local_ocr_enabled':True})
+        p.camera.risk.return_value=(True,'模拟风险')
+        p.latest.frame_id=2;p.content.observe(p.latest)
+        p.worker.poll.return_value=[{'frame_id':2,'captured_at':self.now,'image':p.latest.image,
+            'lines':[{'text':'demo@example.com','confidence':.99,
+                      'polygon':[[10,10],[30,10],[30,20],[10,20]]}],
+            'analysis_regions':None,'elapsed_ms':10}]
+        self.tick()
+        self.assertEqual(p.worker.submit.call_args.args[0].ocr_regions,((0,0,32,32),))
+        self.assertEqual(p.overlay.set_masks.call_args.args[0],[])
+        self.assertEqual(p.content.result_frame_id,1)
+
+    def test_local_ocr_missing_window_prompts_reselection_instead_of_endless_wait(self):
+        p=self.panel
+        p.app_profiles={'missing':{'mode':'region','region':[0,0,1,1],'binding':{'handle':99,'pid':99}}}
+        p.apply_preferences({'local_ocr_enabled':True})
+        p.camera.risk.return_value=(True,'模拟风险')
+        self.tick()
+        self.assertEqual(p.worker.submit.call_args.args[0].ocr_regions,())
+        self.assertEqual(p.overlay.set_masks.call_args.args[0],[])
+        self.assertIn('请暂停后重新框选',p.status.text())
+
     def test_local_ocr_sensitive_result_is_clipped_and_pending_content_stays_clear(self):
         p=self.panel
         p.app_profiles={'test':{'mode':'region','region':[0,0,.5,.5],'binding':{'handle':1,'pid':1}}}
