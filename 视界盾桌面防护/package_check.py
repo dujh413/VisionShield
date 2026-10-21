@@ -35,7 +35,7 @@ def main():
         checks['local_status_channel'] = True
         if value['state'] == 'error':
             result['service_error'] = value['detail']
-        if ('OCR：已就绪' in value['detail'] and value.get('faces_count') is not None
+        if (value.get('ocr_ready') is True and value.get('faces_count') is not None
                 and value['state'] == 'running'):
             checks['camera_and_ocr_parallel'] = True
             checks['mask_disabled'] = not value['protecting'] and not value['full_mask']

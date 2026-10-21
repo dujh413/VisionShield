@@ -10,6 +10,7 @@ def status_payload(panel):
     return {'state':'running' if panel.timer.isActive() and not failed else 'error',
             'detail':panel.status.text(), 'alert':panel.alert_message,
             'sensitive_lines':len(panel.hits), 'protecting':panel.protecting,
+            'ocr_ready':bool(panel.ready),
             'shield_enabled':bool(panel.shield_enabled),
             'owner_verified':bool(camera and camera['owner_verified']),
             'owner_session_active':bool(camera and camera.get('owner_session_active',False)),
