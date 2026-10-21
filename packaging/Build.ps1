@@ -13,6 +13,8 @@ $destination = Join-Path $repo ('dist\' + $OutputName)
 $work = Join-Path $repo ('build\' + $OutputName)
 if (Test-Path -LiteralPath $destination) { throw 'Output exists. Use a new OutputName to preserve prior packages.' }
 $originalPath = $env:PATH
+& $Python (Join-Path $PSScriptRoot 'generate_icon.py')
+if ($LASTEXITCODE -ne 0) { throw 'Application icon generation failed.' }
 try {
     # 避免其他工具的同名DLL被误收集进包，尤其是非Windows ICU库。
     $env:PATH = (Split-Path -Parent $Python) + ';' + $env:SystemRoot + '\System32;' + $env:SystemRoot

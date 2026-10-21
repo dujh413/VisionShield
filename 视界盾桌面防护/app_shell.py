@@ -6,7 +6,6 @@ import sys
 import uuid
 
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox,
                               QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea,
@@ -14,6 +13,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBo
 
 from effect_controls import DEFAULT_BLUR_RADIUS, EffectControls
 from ui_style import STYLE, Switch
+from branding import app_icon
 
 
 class Backend(QObject):
@@ -181,23 +181,7 @@ class Backend(QObject):
 
 
 def shield_icon():
-    pixmap = QPixmap(48, 48)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing)
-    painter.setPen(QPen(QColor('#182620'), 3))
-    painter.setBrush(Qt.NoBrush)
-    path = QPainterPath()
-    path.moveTo(24, 3)
-    path.lineTo(41, 10)
-    path.lineTo(39, 29)
-    path.quadTo(35, 40, 24, 45)
-    path.quadTo(13, 40, 9, 29)
-    path.lineTo(7, 10)
-    path.closeSubpath()
-    painter.drawPath(path)
-    painter.end()
-    return QIcon(pixmap)
+    return app_icon()
 
 
 def separator():
@@ -789,6 +773,7 @@ def main():
         os.environ['VISION_SHIELD_DIAGNOSTICS'] = '1'
     app = QApplication(sys.argv[:1])
     app.setQuitOnLastWindowClosed(False)
+    app.setWindowIcon(shield_icon())
     name = 'VisionShield.Desktop.'+('Preview' if args.preview else 'Main')
     socket = QLocalSocket()
     socket.connectToServer(name)
@@ -801,18 +786,35 @@ def main():
     if not server.listen(name):
         return 1
     panel = Shell(preview=args.preview)
+    panel.startup_splash = None
 
     def activate():
         peer = server.nextPendingConnection()
         if peer is not None:
             peer.disconnectFromServer()
             peer.deleteLater()
-        panel.show_panel()
+        if panel.startup_splash is not None:
+            panel.startup_splash.finish()
+        else:
+            panel.show_panel()
 
     server.newConnection.connect(activate)
-    if args.preview or not panel.has_tray or not panel.settings.value('start_hidden', False, type=bool):
+    auto_enable = not args.preview and panel.settings.value('auto_enable', False, type=bool)
+
+    def ready():
+        panel.startup_splash = None
+        if panel.quitting:
+            return
         panel.show()
-    if not args.preview and panel.settings.value('auto_enable', False, type=bool):
+        if auto_enable:
+            QTimer.singleShot(0, panel.toggle_guard)
+
+    if args.preview or not panel.has_tray or not panel.settings.value('start_hidden', False, type=bool):
+        from startup_visual import StartupSplash
+        panel.startup_splash = StartupSplash()
+        panel.startup_splash.ready.connect(ready)
+        panel.startup_splash.start()
+    elif auto_enable:
         QTimer.singleShot(0, panel.toggle_guard)
     result = app.exec()
     server.close()

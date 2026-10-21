@@ -8,3 +8,4 @@ rapidocr_onnxruntime==1.4.4
 onnxruntime-directml==1.24.4
 uiautomation==2.0.29
 comtypes==1.4.17
+Pillow>=11,<13

@@ -17,10 +17,11 @@ for source, _ in models:
 
 data = [(str(path), target) for path, target in models]
 data.append((str(root/'packaging/YuNet-LICENSE.txt'), 'licenses'))
+data.append((str(root/'assets/VisionShield.svg'), 'assets'))
 data += collect_data_files('rapidocr_onnxruntime', excludes=['models/*'])
 data += collect_data_files('uiautomation')
 data += collect_data_files('comtypes', include_py_files=True)
-hidden = ['guard_service', 'app_shell', 'desktop_guard', 'camera_worker', 'owner_enrollment', 'face_detection', 'onnx_yunet',
+hidden = ['guard_service', 'app_shell', 'branding', 'startup_visual', 'desktop_guard', 'camera_worker', 'owner_enrollment', 'face_detection', 'onnx_yunet',
           'fast_ocr', 'gpu_blur', 'native_text', 'package_check', 'identity_test', 'camera_test',
           'owner_tracking', 'identity_state', 'identity_sender', 'owner_presence', 'app_scope', 'scope_picker',
           'region_tracker', 'region_features', 'region_anchor', 'region_worker']
@@ -46,6 +47,7 @@ a.binaries = [entry for entry in a.binaries if Path(entry[0]).name.lower() not i
               and not Path(entry[0]).name.lower().startswith(('qt6qml', 'qt6quick', 'opencv_videoio_ffmpeg'))]
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='VisionShield',
+          icon=str(root/'assets/VisionShield.ico'),
           debug=False, strip=False, upx=False, console=False,
           disable_windowed_traceback=True)
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='VisionShield')
