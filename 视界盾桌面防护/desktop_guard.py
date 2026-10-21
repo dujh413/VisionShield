@@ -34,6 +34,7 @@ class ControlPanel(QWidget):
         self.exclusion_verified = False
         self.probe_active = False
         self.app_profiles = {}
+        self.local_ocr_enabled = False
         self.region_tracker = None
         self.region_status = '未设置追踪区域'
         self.setWindowTitle('视界盾 · 主屏自动防护')
@@ -131,6 +132,10 @@ class ControlPanel(QWidget):
 
     def apply_preferences(self, value):
         from app_scope import valid_profiles
+        local_ocr = value.get('local_ocr_enabled', self.local_ocr_enabled)
+        if type(local_ocr) is bool and local_ocr != self.local_ocr_enabled:
+            self.local_ocr_enabled = local_ocr
+            if self.overlay is not None:self.overlay.set_masks([],full=False)
         if isinstance(value.get('app_profiles'), dict):
             new_profiles=valid_profiles(value['app_profiles'])
             if new_profiles!=self.app_profiles and self.overlay is not None:
@@ -164,6 +169,7 @@ class ControlPanel(QWidget):
             monitor=self.latest.monitor_rect
             inventory=window_inventory(monitor) if windows is None else windows
             profiles_token=repr(self.app_profiles)
+            local_ocr=self.local_ocr_enabled
             effect=self.effect
             image=self.latest.image
             scope_checked_at=time.monotonic()
@@ -173,7 +179,8 @@ class ControlPanel(QWidget):
                 and any(intersect(window['client'],rectangle) for rectangle in rectangles)]
             def scope_is_current(probe_box,probe_handle):
                 if (self.overlay is not overlay or not self.drawing_enabled()
-                        or self.effect!=effect or repr(self.app_profiles)!=profiles_token):return False
+                        or self.effect!=effect or repr(self.app_profiles)!=profiles_token
+                        or self.local_ocr_enabled!=local_ocr):return False
                 current=[window for window in window_inventory(monitor) if window['handle']!=probe_handle]
                 resolved={}
                 if self.app_profiles:
@@ -183,7 +190,8 @@ class ControlPanel(QWidget):
                     # throughout this short wait, without borrowing newer work.
                     resolved=self.region_tracker.resolve(self.app_profiles,current,image,
                         (monitor['left'],monitor['top']),now=scope_checked_at,asynchronous=False)
-                masks,_=application_masks(current,rectangles,False,self.app_profiles,resolved)
+                masks,_=application_masks(current,rectangles,False,self.app_profiles,resolved,
+                                          local_ocr_enabled=local_ocr)
                 if masks!=rectangles:return False
                 if pixel_clients:
                     import math
@@ -347,7 +355,9 @@ class ControlPanel(QWidget):
             self.protecting = protecting
             full = protecting and (self.latest is None or self.last_ocr_finished is None or bool(self.error) or stale or capture_stale or view["full"])
             rectangles = view["rectangles"] if protecting else []
+            render_rectangles = []
             scoped = False
+            local_ocr_clear = False
             if self.latest is not None and self.latest.monitor_rect:
                 from app_scope import application_masks, window_inventory, profile_status
                 windows = window_inventory(self.latest.monitor_rect)
@@ -358,20 +368,29 @@ class ControlPanel(QWidget):
                     (self.latest.monitor_rect['left'],self.latest.monitor_rect['top']),now)
                 self.region_status = profile_status(self.app_profiles,windows,scopes)
                 if protecting:
-                    rectangles, full = application_masks(windows, rectangles, full, self.app_profiles, resolved=scopes)
+                    rectangles, full = application_masks(windows, rectangles, full, self.app_profiles, resolved=scopes,
+                        local_ocr_enabled=self.local_ocr_enabled, render_scopes=render_rectangles)
+                    if self.local_ocr_enabled and not rectangles and not full and not view['full']:
+                        local_ocr_clear=bool(application_masks(windows,[],True,self.app_profiles,resolved=scopes)[0])
                     scoped = bool(windows)
             else:
                 rectangles=[]
                 self.region_status='等待桌面采集，尚未确认保护范围'
             # 所有运行路径只绘制已确认的应用/选区；失配和异常不扩展到整屏。
             full=False
-            if protecting and rectangles and not self.verify_range_capture(rectangles,windows):rectangles=[]
+            if protecting and rectangles and not self.verify_range_capture(rectangles,windows):
+                rectangles=[];render_rectangles=[]
             if self.overlay is None:return  # 探针事件循环中用户可暂停/退出。
             self.protecting=protecting and bool(rectangles)
-            self.overlay.set_masks(rectangles, full=False, image=self.latest.image if self.latest is not None else None, padding=0)
-            if rectangles and self.protecting:self.overlay.show()
+            self.overlay.set_masks(rectangles, full=False, image=self.latest.image if self.latest is not None else None,
+                                   padding=0, render_rectangles=render_rectangles)
+            # Fully occluded scopes stay transparent but keep their blur cache
+            # warm. Revealing an edge must not restart rendering from black.
+            if protecting and render_rectangles:self.overlay.show()
             elif self.overlay.isVisible():self.overlay.hide()
-            state = '检测异常 · 保持指定范围策略' if self.error else '应用区域保护' if self.protecting else '保护范围暂不可用' if protecting else '正常显示'
+            state = ('检测异常 · 保持指定范围策略' if self.error else '应用区域保护' if self.protecting else
+                     '保护范围暂被其他窗口遮挡' if protecting and render_rectangles else
+                     '未命中敏感内容 · 继续检测' if local_ocr_clear else '保护范围暂不可用' if protecting else '正常显示')
             if not self.drawing_enabled():
                 state = '仅检测与提示（不遮蔽）' + (' · 检测异常' if self.error else ' · 存在风险' if risk_active else '')
             self.status.setText(f'{state} · {reason}\nOCR：'+('异常' if self.error else '已就绪' if self.ready else '加载中'))

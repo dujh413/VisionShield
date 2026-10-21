@@ -1,5 +1,5 @@
 import unittest
-from app_scope import application_masks, profile_status, stored_profiles
+from app_scope import application_masks, profile_status, stored_profiles, valid_profiles
 
 
 def window(handle, key='demo', rect=(100, 100, 500, 400), mode='lines'):
@@ -7,6 +7,57 @@ def window(handle, key='demo', rect=(100, 100, 500, 400), mode='lines'):
 
 
 class SelectedScopeTests(unittest.TestCase):
+    def region_profile(self):
+        return {'demo':{'mode':'region','region':[.1,.1,.4,.5],
+                        'binding':{'handle':1,'pid':10}}}
+
+    def test_region_needs_no_image_features_and_follows_same_window_move_resize(self):
+        profile=self.region_profile()
+        for rect,expected in (((100,100,500,400),(150,140,200,200)),
+                              ((300,200,1000,800),(400,280,400,400))):
+            target=window(1,rect=rect)
+            self.assertEqual(application_masks([target],[],False,profile,{}),([expected],False))
+            self.assertIn('已定位1/1',profile_status(profile,[target],{}))
+
+    def test_region_never_rebinds_on_restart_or_pid_reuse(self):
+        profile=self.region_profile()
+        self.assertEqual(application_masks([window(2)],[],True,profile,{}),([],False))
+        reused=window(1);reused['pid']=11
+        self.assertEqual(application_masks([reused],[],True,profile,{}),([],False))
+        saved=stored_profiles(profile)
+        self.assertEqual(application_masks([window(1)],[],True,saved,{}),([],False))
+        self.assertIn('局部配置需暂停后重新框选',profile_status(saved,[window(1)],{}))
+
+    def test_region_ocr_only_masks_intersection_with_sensitive_or_unknown_parts(self):
+        profile=self.region_profile();target=window(1)
+        hits=[(140,150,40,20),(200,200,40,20),(500,350,50,20)]
+        self.assertEqual(application_masks([target],hits,False,profile,{},True),
+                         ([(150,150,30,20),(200,200,40,20)],False))
+        self.assertEqual(application_masks([target],[],False,profile,{},True),([],False))
+        self.assertEqual(application_masks([target],[],True,profile,{},True),([(150,140,200,200)],False))
+        self.assertEqual(application_masks([target],hits,False,profile,{},False),([(150,140,200,200)],False))
+
+    def test_ocr_switch_keeps_whole_window_policy_and_legacy_local_scope(self):
+        target=window(1)
+        whole={'demo':{'mode':'window','binding':{'handle':1,'pid':10}}}
+        self.assertEqual(application_masks([target],[],False,whole,{},True),([target['rect']],False))
+        resolved={'demo':{'handle':1,'rect':(180,190,200,150)}}
+        self.assertEqual(application_masks([target],[(190,200,30,20)],False,self.profile(),resolved,True),
+                         ([(190,200,30,20)],False))
+
+    def test_moving_occluder_changes_visible_clip_not_render_geometry(self):
+        target=window(1);profile=self.region_profile()
+        for x in range(170,350,10):
+            cover=window(2,'other',(x,140,50,200))
+            render=[]
+            masks,_=application_masks([cover,target],[],False,profile,{},render_scopes=render)
+            self.assertEqual(render,[(150,140,200,200)])
+            self.assertTrue(all(not (r[0]<x+50 and r[0]+r[2]>x) for r in masks))
+
+    def test_region_validation_rejects_nonfinite_and_out_of_bounds(self):
+        for part in ([0,0,float('nan'),.2],[0,0,float('inf'),.2],[.9,0,.2,.2],[-.1,0,.2,.2],[0,0,0,.2]):
+            self.assertEqual(valid_profiles({'demo':{'mode':'region','region':part}}),{})
+
     def profile(self):
         return {'demo':{'mode':'tracked','binding':{'handle':1,'pid':10},
             'anchor':{'type':'native','class':'Pane','id':12,'fraction':[0,0,1,1]}}}

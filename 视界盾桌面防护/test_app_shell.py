@@ -282,6 +282,36 @@ class ShellTests(unittest.TestCase):
         packet=json.loads(backend.peer.write.call_args.args[0])
         self.assertEqual(packet['effect_text'],'12')
         self.assertIn('app_profiles',packet)
+        self.assertFalse(packet['local_ocr_enabled'])
+        backend.local_ocr_enabled=True
+        backend.send_preferences()
+        self.assertTrue(json.loads(backend.peer.write.call_args.args[0])['local_ocr_enabled'])
+
+    def test_local_region_selection_does_not_require_uia_or_feature_enrollment(self):
+        profile={'mode':'region','region':[.1,.1,.4,.4],'binding':{'handle':44,'pid':55}}
+        picker=Mock(result_profile=('app',profile))
+        picker.exec.return_value=QDialog.Accepted
+        with patch('scope_picker.ScopePicker',return_value=picker),patch('region_worker.enroll_region') as enroll:
+            self.panel.calibrate_scope(False)
+        enroll.assert_not_called()
+        self.assertEqual(self.panel.load_profiles()['app'],profile)
+
+    def test_local_ocr_setting_saves_sends_live_and_cancel_does_not_override(self):
+        self.backend.send_preferences=Mock()
+        def choose(accepted):
+            dialog=self.app.activeModalWidget()
+            switch=dialog.findChild(QCheckBox,'local_ocr_enabled')
+            switch.setChecked(accepted)
+            dialog.accept() if accepted else dialog.reject()
+        QTimer.singleShot(0,lambda:choose(True))
+        self.panel.open_settings()
+        self.assertTrue(self.settings.value('local_ocr_enabled',False,type=bool))
+        self.assertTrue(self.backend.local_ocr_enabled)
+        self.assertTrue(self.backend.send_preferences.called)
+        QTimer.singleShot(0,lambda:choose(False))
+        self.panel.open_settings()
+        self.assertTrue(self.backend.local_ocr_enabled)
+        self.assertTrue(QSettings(self.path,QSettings.IniFormat).value('local_ocr_enabled',False,type=bool))
 
     def test_service_status_delivers_reminder_and_stopping_ignores_it(self):
         backend=Backend()

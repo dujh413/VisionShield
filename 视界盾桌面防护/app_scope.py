@@ -2,6 +2,7 @@
 import ctypes
 from ctypes import wintypes as w
 import os
+import math
 
 CHAT = {'wechat.exe','weixin.exe','qq.exe','tim.exe','dingtalk.exe','feishu.exe','teams.exe','ms-teams.exe','telegram.exe','discord.exe'}
 IMAGE = {'photos.exe','microsoft.photos.exe','photoviewer.exe','photoshop.exe','gimp.exe','paintdotnet.exe','mspaint.exe','imageglass.exe','irfanview.exe','i_view64.exe'}
@@ -36,13 +37,21 @@ def valid_profiles(value):
             binding=profile.get('binding')
             if isinstance(binding,dict) and all(type(binding.get(k)) is int and 0<binding[k]<2**64 for k in ('handle','pid')):
                 result[key]['binding']={'handle':binding['handle'],'pid':binding['pid']}
+        elif profile.get('mode')=='region':
+            part=profile.get('region');binding=profile.get('binding')
+            if (not isinstance(part,list) or len(part)!=4 or
+                    not all(type(v) in (int,float) and math.isfinite(v) and 0<=v<=1 for v in part) or
+                    min(part[2:])<=0 or part[0]+part[2]>1.00001 or part[1]+part[3]>1.00001):continue
+            entry={'mode':'region','region':part}
+            if isinstance(binding,dict) and all(type(binding.get(k)) is int and 0<binding[k]<2**64 for k in ('handle','pid')):
+                entry['binding']={'handle':binding['handle'],'pid':binding['pid']}
+            result[key]=entry
         elif profile.get('mode')=='tracked':
             from region_features import valid_features
             anchor=profile.get('anchor');binding=profile.get('binding')
             if not isinstance(anchor,dict) or anchor.get('type') not in ('native','uia','visual'):continue
             kind=anchor['type'];clean={'type':kind}
             if kind!='visual':
-                import math
                 part=anchor.get('fraction')
                 if not isinstance(part,list) or len(part)!=4 or not all(type(v) in (int,float) and math.isfinite(v) and 0<=v<=1 for v in part) or min(part[2:])<=0 or part[0]+part[2]>1.00001 or part[1]+part[3]>1.00001:continue
                 clean['fraction']=part
@@ -86,9 +95,10 @@ def profile_status(profiles, windows, resolved):
         candidates=[win for win in windows if win['key']==key and win['mode']!='ignore']
         bound=profile.get('binding')
         window=(next((win for win in candidates if win['handle']==bound['handle'] and win['pid']==bound['pid']),None)
-                if bound else candidates[0] if len(candidates)==1 and profile['mode']!='window' else None)
+                if bound else candidates[0] if len(candidates)==1 and profile['mode'] not in ('window','region') else None)
         if window is None:continue
         if profile['mode']=='window':available+=1
+        elif profile['mode']=='region' and region_scope(profile,window) is not None:available+=1
         elif profile['mode']=='tracked':
             match=resolved.get(key)
             if match and match['handle']==window['handle'] and match['rect'] is not None and intersect(match['rect'],window['rect']):
@@ -96,11 +106,26 @@ def profile_status(profiles, windows, resolved):
     status=f'已定位{available}/{len(profiles)}个指定范围'
     if any(profile['mode']=='window' and not profile.get('binding') for profile in profiles.values()):
         status+='；整窗配置需暂停后重新点击目标窗口'
+    if any(profile['mode']=='region' and not profile.get('binding') for profile in profiles.values()):
+        status+='；局部配置需暂停后重新框选'
     if available<len(profiles):status+='；未定位的范围暂停遮蔽，请暂停后重新选择；不会扩大保护'
     return status
 
 
-def application_masks(windows, rectangles, uncertain, profiles=None, resolved=None):
+def region_scope(profile, window):
+    """Window-relative selection in physical pixels; never adopts another window."""
+    client=window['client']
+    if client[2]<=0 or client[3]<=0:return None
+    x,y,width,height=profile['region']
+    left=math.ceil(client[0]+x*client[2]-1e-6)
+    top=math.ceil(client[1]+y*client[3]-1e-6)
+    right=math.floor(client[0]+(x+width)*client[2]+1e-6)
+    bottom=math.floor(client[1]+(y+height)*client[3]+1e-6)
+    return intersect((left,top,max(0,right-left),max(0,bottom-top)),window['rect'])
+
+
+def application_masks(windows, rectangles, uncertain, profiles=None, resolved=None,
+                      local_ocr_enabled=False, render_scopes=None):
     profiles=valid_profiles(profiles or {})
     if not windows:
         # 无法确认边界时不越过用户范围；状态栏提示范围暂不可用。
@@ -114,10 +139,13 @@ def application_masks(windows, rectangles, uncertain, profiles=None, resolved=No
             candidates=[win for win in windows if win['key']==window['key'] and win['mode']!='ignore']
             bound=profile.get('binding') if profile else None
             scope_valid=bool(profile and (bound and window.get('handle')==bound['handle'] and window.get('pid')==bound['pid']
-                                         or not bound and profile['mode']!='window' and len(candidates)==1))
+                                         or not bound and profile['mode'] not in ('window','region') and len(candidates)==1))
         if profile and mode != 'ignore':
             mode=profile['mode']
         scope=rect
+        if mode=='region':
+            scope=region_scope(profile,window)
+            scope_valid=scope_valid and scope is not None
         if mode=='tracked':
             match=(resolved or {}).get(window['key'])
             if match and match['handle']==window['handle'] and match['rect'] is not None:
@@ -136,9 +164,15 @@ def application_masks(windows, rectangles, uncertain, profiles=None, resolved=No
                 else:scope_valid=False
             elif profile and profile.get('mode')=='chat':scope_valid=False
             # 无有效校准时整应用保护，不猜对话区域。
-        selected=([] if not scope_valid else [scope] if mode in ('window','chat','tracked') else
+        local_ocr=local_ocr_enabled and profile and mode in ('region','tracked','chat')
+        selected=([] if not scope_valid else
+                  [clip for candidate in rectangles if (clip:=intersect(candidate,scope))] if local_ocr and not uncertain else
+                  [scope] if mode in ('window','chat','tracked','region') else
                   [rect] if uncertain and mode!='ignore' else
                   [clip for candidate in rectangles if (clip:=intersect(candidate,rect))] if mode!='ignore' else [])
+        # Render against stable protection bounds. Foreground motion changes
+        # only the final visible clip, not blur job geometry or GPU ownership.
+        if render_scopes is not None:render_scopes.extend(selected)
         # 程序自身始终保持可见，不能依赖Qt置顶窗口的瞬时排序。
         for cover in covers+excluded:
             selected=[part for candidate in selected for part in subtract(candidate,cover)]

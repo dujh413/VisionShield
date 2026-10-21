@@ -40,6 +40,7 @@ class Backend(QObject):
         self.job = None
         self.failure_detail = None
         self.app_profiles = {}
+        self.local_ocr_enabled = False
         self.watchdog = QTimer(self)
         self.watchdog.setSingleShot(True)
         self.watchdog.timeout.connect(self.timed_out)
@@ -70,7 +71,8 @@ class Backend(QObject):
 
     def send_preferences(self):
         if self.peer is not None and not self.stopping:
-            packet = {'shield_enabled':self.shield_enabled, 'app_profiles':self.app_profiles, 'effect_text':self.effect_text}
+            packet = {'shield_enabled':self.shield_enabled, 'app_profiles':self.app_profiles, 'effect_text':self.effect_text,
+                      'local_ocr_enabled':self.local_ocr_enabled}
             self.peer.write((json.dumps(packet, ensure_ascii=True)+'\n').encode())
             self.peer.flush()
 
@@ -337,6 +339,7 @@ class Shell(QWidget):
         self.settings.setValue('blur_radius', self.effect_input.slider.value())
         self.settings.sync()
         self.backend.effect_text = text
+        self.backend.local_ocr_enabled = self.settings.value('local_ocr_enabled', False, type=bool)
         if hasattr(self.backend, 'send_preferences'):
             self.backend.send_preferences()
         if self.state == 'running':
@@ -357,9 +360,9 @@ class Shell(QWidget):
         explanation = (
             f'保护范围：已选 {local} 处局部、{whole} 个整窗，仅处理有效范围。无法定位时需重新选择。' if profiles else
             '保护范围：自动按应用与内容保护。需要限定范围时，请到设置中选择局部或整窗。')
-        reselection = any(profile['mode']=='window' and not profile.get('binding') for profile in profiles.values())
+        reselection = any(profile['mode'] in ('window','region') and not profile.get('binding') for profile in profiles.values())
         if reselection:
-            explanation += '\n整窗范围在软件重启后需到设置中重新点击目标窗口。'
+            explanation += '\n软件重启后需到设置中重新选择局部或整窗范围。'
         self.scope_summary.setText(f'{len(profiles)} 个已选范围'+(' · 需重新选择' if reselection else '')
                                    if profiles else '自动按应用与内容保护')
         self.scope_summary.setToolTip(explanation)
@@ -602,6 +605,20 @@ class Shell(QWidget):
         local_note.setObjectName('caption')
         local_note.setWordWrap(True)
         layout.addWidget(local_note)
+        local_ocr = Switch('框选区域内自动识别敏感内容')
+        local_ocr.setObjectName('local_ocr_enabled')
+        local_ocr.setChecked(self.settings.value('local_ocr_enabled', False, type=bool))
+        ocr_row = QHBoxLayout()
+        ocr_label = QLabel('框选区域内自动识别敏感内容')
+        ocr_label.setObjectName('optionTitle')
+        ocr_label.setBuddy(local_ocr)
+        ocr_row.addWidget(ocr_label, 1)
+        ocr_row.addWidget(local_ocr)
+        layout.addLayout(ocr_row)
+        ocr_note = QLabel('开启：风险出现时，用本地OCR识别手机号、邮箱、证件号及标签关联的敏感文字，只处理命中或待分析部分。关闭：保护整个选区。识别未完成时临时保护选区，不影响整窗设置。')
+        ocr_note.setObjectName('caption')
+        ocr_note.setWordWrap(True)
+        layout.addWidget(ocr_note)
         scope_window.setToolTip('保护该窗口的全部可见内容；软件重启后需重新选择，不会自动改绑其他窗口。')
         scope_chat.setToolTip('仅保护所框选的局部；定位失效时暂停该选区遮蔽，不扩大范围。重启后需重新框选。')
         replace_note = QLabel('选择或清除范围会先保存本页选项。')
@@ -684,7 +701,10 @@ class Shell(QWidget):
                 self.reminder_timer.stop()
             self.settings.setValue('auto_enable', auto.isChecked())
             self.settings.setValue('start_hidden', hidden.isChecked())
+            self.settings.setValue('local_ocr_enabled', local_ocr.isChecked())
             self.settings.sync()
+            self.backend.local_ocr_enabled = local_ocr.isChecked()
+            if hasattr(self.backend, 'send_preferences'):self.backend.send_preferences()
         if dialog.exec() == QDialog.Accepted:
             save_form()
         dialog.deleteLater()
@@ -716,7 +736,7 @@ class Shell(QWidget):
                 if key not in profiles and len(profiles) >= 20:
                     self.detail.setText('已保存20个应用区域，请先清除旧区域后重试。')
                     return
-                if not whole:
+                if not whole and profile.get('mode') != 'region':
                     from region_worker import enroll_region
                     result=enroll_region(profile,self)
                     if 'profile' not in result:
@@ -725,7 +745,7 @@ class Shell(QWidget):
                 profiles[key] = profile
                 self.save_profiles(profiles)
                 self.detail.setText('已选择整窗保护，仅保护刚才点击的窗口。' if whole else
-                                    '已选择局部保护，仅保护框选区域；定位丢失时暂停该选区遮蔽，请重新框选。')
+                                    '已选择局部保护，选区随该窗口移动和缩放；内容布局改变后请重新框选。')
         except Exception:
             self.detail.setText('区域校准失败，请重新选择；当前保护策略继续保留。')
         finally:

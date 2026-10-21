@@ -104,7 +104,7 @@ class BlurTests(unittest.TestCase):
         finally:
             overlay.close()
 
-    def test_hide_geometry_and_close_release_cache_and_owned_worker(self):
+    def test_hide_clears_pixels_keeps_worker_warm_and_geometry_change_releases_it(self):
         overlay = self.make_overlay()
         image = np.full((200, 400, 3), 255, np.uint8)
         masks = [(30, 50, 170, 20)]
@@ -112,12 +112,14 @@ class BlurTests(unittest.TestCase):
             self.finish_blur(overlay, masks, image)
             worker = overlay.blur_worker
             overlay.hide()
-            self.assertFalse(worker.alive)
+            self.assertTrue(worker.alive)
             self.assertIsNone(overlay.mask_image)
             self.assertEqual(overlay.blurs, [])
+            self.assertEqual(overlay._renderer._ready, {})
             overlay.show()
             self.assertEqual(overlay.grab().toImage().pixelColor(20, 20).alpha(), 0)
             self.finish_blur(overlay, masks, image)
+            self.assertIs(overlay.blur_worker,worker)
             worker = overlay.blur_worker
             overlay.screen_geometry_changed(overlay.geometry())
             self.assertFalse(worker.alive)
@@ -126,6 +128,62 @@ class BlurTests(unittest.TestCase):
             self.assertEqual(overlay.blurs, [])
         finally:
             overlay.close()
+
+    def test_moving_foreground_clip_reuses_blur_and_never_paints_over_foreground(self):
+        from app_scope import subtract
+        overlay=self.make_overlay()
+        image=np.full((200,400,3),220,np.uint8)
+        scope=(30,50,170,80)
+        try:
+            self.finish_blur(overlay,[scope],image,padding=0)
+            worker=overlay.blur_worker
+            renderer=overlay._renderer
+            for x in range(40,190,5):
+                masks=subtract(scope,(x,50,10,80))
+                with patch.object(renderer,'clear',wraps=renderer.clear) as clear:
+                    overlay.set_masks(masks,image=image,padding=0,render_rectangles=[scope])
+                    clear.assert_not_called()
+                self.assertIs(worker,overlay.blur_worker)
+                self.assertFalse(overlay._fallback_boxes)
+                shot=overlay.grab().toImage()
+                self.assertEqual(shot.pixelColor(x+4,80).alpha(),0)
+                self.assertEqual(shot.pixelColor(32,80).getRgb(),(220,220,220,255))
+                self.assertEqual(shot.pixelColor(20,80).alpha(),0)
+            overlay.set_effect(parse_effect('遮挡'))
+            shot=overlay.grab().toImage()
+            self.assertEqual(shot.pixelColor(188,80).alpha(),0)
+            self.assertEqual(shot.pixelColor(32,80).alpha(),255)
+        finally:overlay.close()
+
+    def test_render_scope_and_pending_fallback_are_always_clipped_to_visible_scope(self):
+        overlay=self.make_overlay()
+        try:
+            for source in (None,np.zeros((20,20),np.float32)):
+                overlay.set_masks([(30,50,30,20)],image=source,padding=0,
+                                  render_rectangles=[(0,0,400,200)])
+                shot=overlay.grab().toImage()
+                self.assertEqual(shot.pixelColor(35,55).alpha(),255)
+                self.assertEqual(shot.pixelColor(65,55).alpha(),0)
+                self.assertEqual(shot.pixelColor(200,100).alpha(),0)
+        finally:overlay.close()
+
+    def test_fully_covered_scope_stays_transparent_and_reveal_reuses_blur(self):
+        overlay=self.make_overlay()
+        image=np.full((200,400,3),220,np.uint8)
+        scope=(30,50,170,80)
+        try:
+            self.finish_blur(overlay,[scope],image,padding=0)
+            worker=overlay.blur_worker
+            for _ in range(5):
+                overlay.set_masks([],image=image,padding=0,render_rectangles=[scope])
+                self.assertTrue(overlay.isVisible())
+                self.assertIs(overlay.blur_worker,worker)
+                self.assertFalse(overlay._fallback_boxes)
+                self.assertEqual(overlay.grab().toImage().pixelColor(60,60).alpha(),0)
+            overlay.set_masks([scope],image=image,padding=0,render_rectangles=[scope])
+            self.assertFalse(overlay._fallback_boxes)
+            self.assertEqual(overlay.grab().toImage().pixelColor(60,60).getRgb(),(220,220,220,255))
+        finally:overlay.close()
 
     def test_close_timeout_reaches_controller_and_keeps_only_scoped_fallback(self):
         started, release = threading.Event(), threading.Event()

@@ -88,6 +88,50 @@ class ControlSafetyTests(unittest.TestCase):
         self.tick()
         self.assertTrue(self.panel.protecting)
 
+    def test_local_ocr_toggle_applies_to_production_policy_and_rejects_invalid_values(self):
+        p=self.panel
+        p.app_profiles={'test':{'mode':'region','region':[0,0,1,1],'binding':{'handle':1,'pid':1}}}
+        p.camera.risk.return_value=(True,'模拟风险')
+        self.tick()
+        self.assertTrue(p.protecting)
+        p.apply_preferences({'local_ocr_enabled':True})
+        self.tick()
+        self.assertFalse(p.protecting)
+        self.assertIn('未命中敏感内容',p.status.text())
+        p.apply_preferences({'local_ocr_enabled':'false'})
+        self.assertTrue(p.local_ocr_enabled)
+        p.apply_preferences({'local_ocr_enabled':False})
+        self.tick()
+        self.assertTrue(p.protecting)
+
+    def test_local_ocr_sensitive_result_and_pending_content_stay_inside_selected_scope(self):
+        p=self.panel
+        p.app_profiles={'test':{'mode':'region','region':[0,0,.5,.5],'binding':{'handle':1,'pid':1}}}
+        p.apply_preferences({'local_ocr_enabled':True})
+        p.camera.risk.return_value=(True,'模拟风险')
+        p.latest.frame_id+=1
+        p.content.observe(p.latest)
+        lines=[{'text':'test@example.com','confidence':.99,'polygon':[[10,10],[50,10],[50,25],[10,25]]}]
+        p.content.accept({'frame_id':p.latest.frame_id,'captured_at':self.now,'image':p.latest.image,
+                          'lines':lines,'unknown_regions':[]},self.now)
+        self.tick()
+        self.assertEqual(p.overlay.set_masks.call_args.args[0],[(10.,10.,22.,15.)])
+        p.content.result=None
+        self.tick()
+        self.assertEqual(p.overlay.set_masks.call_args.args[0],[(0,0,32,32)])
+
+    def test_fully_occluded_selection_keeps_transparent_overlay_and_warm_render_scope(self):
+        p=self.panel
+        p.app_profiles={'test':{'mode':'region','region':[0,0,1,1],'binding':{'handle':1,'pid':1}}}
+        p.camera.risk.return_value=(True,'模拟风险')
+        cover={'key':'cover','handle':2,'pid':2,'mode':'lines','rect':(0,0,64,64),'client':(0,0,64,64)}
+        target={'key':'test','handle':1,'pid':1,'mode':'lines','rect':(0,0,64,64),'client':(0,0,64,64)}
+        with patch('app_scope.window_inventory',return_value=[cover,target]):self.tick()
+        p.overlay.show.assert_called_once()
+        p.overlay.hide.assert_not_called()
+        self.assertEqual(p.overlay.set_masks.call_args.args[0],[])
+        self.assertEqual(p.overlay.set_masks.call_args.kwargs['render_rectangles'],[(0,0,64,64)])
+
     def test_same_safe_camera_packet_does_not_restore_after_ui_wait(self):
         self.panel.state=ProtectionState(restore_delay=1)
         self.tick()

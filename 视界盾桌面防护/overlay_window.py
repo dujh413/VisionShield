@@ -2,7 +2,7 @@ import ctypes
 import time
 from ctypes import wintypes
 from PySide6.QtCore import Qt, QRectF
-from PySide6.QtGui import QColor, QPainter, QImage
+from PySide6.QtGui import QColor, QPainter, QImage, QPainterPath
 from PySide6.QtWidgets import QWidget
 from mask_effect import MaskEffect
 from blur_renderer import BlurCache, mask_crops, physical_to_logical
@@ -32,6 +32,8 @@ class OverlayWindow(QWidget):
         self.setGeometry(screen.geometry())
         screen.geometryChanged.connect(self.screen_geometry_changed)
         self.rectangles = []
+        self.render_rectangles = None
+        self._visible_boxes = ()
         self.full = False
         self.padding = 8
         self.effect = MaskEffect('block')
@@ -107,6 +109,7 @@ class OverlayWindow(QWidget):
             return
         rectangles, full, padding, image = (self.rectangles, self.full,
                                             self.padding, self.mask_image)
+        render_rectangles = self.render_rectangles
         if self.effect.mode == 'blur' and effect.mode == 'blur' and self._renderer is not None:
             self._renderer.set_radius(effect.radius)
         else:
@@ -114,9 +117,11 @@ class OverlayWindow(QWidget):
         self.effect = effect
         # A live strength/mode change keeps exactly the current scope. Clearing
         # it first causes a transparent frame; expanding it causes black flashes.
-        self.set_masks(rectangles, full=full, image=image, padding=padding)
+        self.set_masks(rectangles, full=full, image=image, padding=padding,
+                       render_rectangles=render_rectangles)
 
-    def set_masks(self, rectangles, full=False, image=None, padding=8, frame_image=None):
+    def set_masks(self, rectangles, full=False, image=None, padding=8, frame_image=None,
+                  render_rectangles=None):
         if self._closed:
             return
         if frame_image is None:
@@ -127,6 +132,8 @@ class OverlayWindow(QWidget):
         self.mask_image = frame_image
         self.padding = padding
         self.rectangles, self.full = list(rectangles), bool(full)
+        self.render_rectangles = None if render_rectangles is None else list(render_rectangles)
+        self._visible_boxes = ()
         self._mask_error = None
         if self.effect.mode == 'off':
             self.mask_image = None
@@ -143,14 +150,23 @@ class OverlayWindow(QWidget):
             try:
                 if not self.full:
                     boxes = mask_crops(self.rectangles, shape, padding)
-                if not boxes or self.effect.mode != 'blur' or frame_image is None:
+                self._visible_boxes = boxes
+                render_boxes = boxes
+                if render_rectangles is not None and not self.full:
+                    from app_scope import subtract
+                    render_boxes = mask_crops(self.render_rectangles, shape, 0)
+                    missing = list(boxes)
+                    for cover in render_boxes:
+                        missing = [part for box in missing for part in subtract(box, cover)]
+                    render_boxes = tuple(sorted(set(render_boxes + tuple(missing))))
+                if not render_boxes or self.effect.mode != 'blur' or frame_image is None:
                     if self._renderer is not None:
                         self._renderer.clear()
                     ready, pending = [], list(boxes)
                 else:
                     if self._renderer is None:
                         self._renderer = BlurCache(radius=self.effect.radius)
-                    ready, pending = self._renderer.update(boxes, frame_image)
+                    ready, pending = self._renderer.update(render_boxes, frame_image)
                 blurs, qimages = [], {}
                 for box, rgb in ready:
                     cached = self._qimages.get(box)
@@ -176,6 +192,7 @@ class OverlayWindow(QWidget):
                         except (TypeError, ValueError, OverflowError):
                             continue
                     boxes = tuple(sorted(set(valid)))
+                self._visible_boxes = boxes
                 self.blurs, self._fallback_boxes, self._qimages = [], [], {}
                 self._fallback_boxes = list(boxes)
                 if self._renderer is not None:
@@ -208,7 +225,12 @@ class OverlayWindow(QWidget):
         return super().close()
 
     def hideEvent(self, event):
-        self._release_renderer()
+        # Occlusion/recovery is temporary. Drop all frame/result references,
+        # but keep the owned worker/GPU context warm; pause/close releases it.
+        if self._renderer is not None:self._renderer.clear()
+        self.mask_image = None
+        self.blurs, self._qimages = [], {}
+        self.render_rectangles, self._visible_boxes = None, ()
         # A reused protected overlay waits for a fresh controller decision.
         self.rectangles, self.full, self._fallback_boxes = [], False, []
         super().hideEvent(event)
@@ -236,6 +258,11 @@ class OverlayWindow(QWidget):
             else:
                 # mss uses physical pixels; Qt window coordinates are logical.
                 ratio = self.devicePixelRatioF()
+                clip = QPainterPath()
+                clip.setFillRule(Qt.WindingFill)
+                for box in self._visible_boxes:
+                    clip.addRect(QRectF(*physical_to_logical(box, ratio)))
+                painter.setClipPath(clip)
                 for box in self._fallback_boxes:
                     painter.drawRect(QRectF(*physical_to_logical(box, ratio)))
                 for box, image in self.blurs:

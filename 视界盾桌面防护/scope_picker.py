@@ -1,4 +1,4 @@
-"""框选应用区域；随后建立控件/视觉锚点，截图不落盘。"""
+"""框选并绑定窗口内的相对位置；不依赖图像特征，不保存截图。"""
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QApplication, QDialog
@@ -10,7 +10,7 @@ class ScopePicker(QDialog):
         self.whole=whole;self.first=None;self.result_profile=None;self.pressed_window=None
         self.instruction = ('整窗保护 · 仅保护点击的窗口' if whole else '局部保护 · 仅保护框选部分')
         self.hint = ('点击目标应用窗口即可完成。窗口拖动或缩放时，保护范围随之变化；Esc 取消。' if whole else
-                     '在目标窗口内按住鼠标拖动，松开完成。包含边框或固定图标可帮助追踪；Esc 取消。')
+                     '在目标窗口内按住鼠标拖动，松开完成。选区随窗口移动和缩放；窗口内容布局改变后请重新框选。Esc 取消。')
         self.notice = ''
         self.screen=QApplication.primaryScreen();self.ratio=self.screen.devicePixelRatio()
         self.setGeometry(self.screen.geometry())
@@ -79,7 +79,7 @@ class ScopePicker(QDialog):
             if clipped is None or clipped[2]<20 or clipped[3]<20:
                 self.cancel_selection('选区太小，请重新拖动框选目标区域。');return
             cx,cy,cw,ch=client
-            profile={'command':'enroll','region':[(clipped[0]-cx)/cw,(clipped[1]-cy)/ch,clipped[2]/cw,clipped[3]/ch],
+            profile={'mode':'region','region':[(clipped[0]-cx)/cw,(clipped[1]-cy)/ch,clipped[2]/cw,clipped[3]/ch],
                      'binding':{'handle':window['handle'],'pid':window['pid']}}
         self.result_profile=(window['key'],profile)
         self.accept()

@@ -107,7 +107,7 @@ class ScopePickerTests(unittest.TestCase):
             self.assertIn('仅保护点击的窗口',picker.instruction)
         finally:picker.hide();picker.deleteLater()
 
-    def test_local_selection_has_clear_help_and_is_enrollment_request(self):
+    def test_local_selection_has_clear_help_and_binds_relative_region_directly(self):
         picker=self.picker();picker.show()
         try:
             self.app.processEvents()
@@ -118,7 +118,8 @@ class ScopePickerTests(unittest.TestCase):
             QTest.mouseRelease(picker,Qt.LeftButton,pos=end)
             key,profile=picker.result_profile
             self.assertEqual(key,'fake-app')
-            self.assertEqual(profile['command'],'enroll')
+            self.assertEqual(profile['mode'],'region')
+            self.assertEqual(len(profile['region']),4)
             self.assertEqual(profile['binding'],{'handle':321,'pid':123})
             self.assertIn('仅保护框选部分',picker.instruction)
             self.assertIn('按住鼠标拖动',picker.hint)
