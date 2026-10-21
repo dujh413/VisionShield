@@ -23,6 +23,8 @@ def exclude_capture(widget):
 
 
 class OverlayWindow(QWidget):
+    MOVE_SETTLE_SECONDS = .05
+
     def __init__(self, screen):
         super().__init__()
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint |
@@ -34,6 +36,11 @@ class OverlayWindow(QWidget):
         self.rectangles = []
         self.render_rectangles = None
         self._visible_boxes = ()
+        self.render_bindings = {}
+        self.frame_captured_at = None
+        self._motion_tiles = {}
+        self._motion_active = False
+        self._motion_at = self._motion_fresh_at = None
         self.full = False
         self.padding = 8
         self.effect = MaskEffect('block')
@@ -110,6 +117,8 @@ class OverlayWindow(QWidget):
         rectangles, full, padding, image = (self.rectangles, self.full,
                                             self.padding, self.mask_image)
         render_rectangles = self.render_rectangles
+        render_bindings, captured_at = self.render_bindings, self.frame_captured_at
+        self._motion_tiles={};self._motion_active=False
         if self.effect.mode == 'blur' and effect.mode == 'blur' and self._renderer is not None:
             self._renderer.set_radius(effect.radius)
         else:
@@ -118,10 +127,38 @@ class OverlayWindow(QWidget):
         # A live strength/mode change keeps exactly the current scope. Clearing
         # it first causes a transparent frame; expanding it causes black flashes.
         self.set_masks(rectangles, full=full, image=image, padding=padding,
-                       render_rectangles=render_rectangles)
+                       render_rectangles=render_rectangles, render_bindings=render_bindings,
+                       frame_captured_at=captured_at)
+
+    def _motion_frame(self, boxes, bindings, captured_at, now):
+        """Move opaque tiles only with the same bound window, scope and extent.
+
+        Screen captures lag native window movement. During a drag, sampling the
+        new rectangle from the older capture would blur the background instead.
+        Keep the last obscured tile until a post-move frame can be rendered.
+        """
+        tokens={box:(bindings[box],box[2:]) for box in boxes if box in bindings}
+        if len(tokens)!=len(boxes) or len(set(tokens.values()))!=len(boxes):tokens={}
+        if set(tokens.values())!=set(self._motion_tiles):
+            if self._motion_tiles and self._renderer is not None:self._renderer.clear()
+            self._motion_tiles={}
+            self._motion_active=False
+        frozen=[]
+        if tokens and self._motion_tiles:
+            moved=any(self._motion_tiles[token][0][:2]!=box[:2] for box,token in tokens.items())
+            if moved:
+                if not self._motion_active and self._renderer is not None:self._renderer.clear()
+                self._motion_active=True
+                self._motion_at=now
+                self._motion_fresh_at=None
+            frozen=[(box,self._motion_tiles[token][1]) for box,token in tokens.items()]
+            self._motion_tiles={token:(box,self._motion_tiles[token][1]) for box,token in tokens.items()}
+        waiting=(self._motion_active and (captured_at is None or
+                 captured_at<=self._motion_at+self.MOVE_SETTLE_SECONDS))
+        return tokens,frozen,waiting
 
     def set_masks(self, rectangles, full=False, image=None, padding=8, frame_image=None,
-                  render_rectangles=None):
+                  render_rectangles=None, render_bindings=None, frame_captured_at=None):
         if self._closed:
             return
         if frame_image is None:
@@ -133,6 +170,8 @@ class OverlayWindow(QWidget):
         self.padding = padding
         self.rectangles, self.full = list(rectangles), bool(full)
         self.render_rectangles = None if render_rectangles is None else list(render_rectangles)
+        self.render_bindings = dict(render_bindings or {})
+        self.frame_captured_at = frame_captured_at
         self._visible_boxes = ()
         self._mask_error = None
         if self.effect.mode == 'off':
@@ -160,13 +199,16 @@ class OverlayWindow(QWidget):
                         missing = [part for box in missing for part in subtract(box, cover)]
                     render_boxes = tuple(sorted(set(render_boxes + tuple(missing))))
                 if not render_boxes or self.effect.mode != 'blur' or frame_image is None:
+                    self._motion_tiles={};self._motion_active=False
                     if self._renderer is not None:
                         self._renderer.clear()
                     ready, pending = [], list(boxes)
                 else:
                     if self._renderer is None:
                         self._renderer = BlurCache(radius=self.effect.radius)
-                    ready, pending = self._renderer.update(render_boxes, frame_image)
+                    tokens,frozen,waiting=self._motion_frame(render_boxes,self.render_bindings,
+                                                             frame_captured_at,time.monotonic())
+                    ready,pending=([],[]) if waiting else self._renderer.update(render_boxes, frame_image)
                 blurs, qimages = [], {}
                 for box, rgb in ready:
                     cached = self._qimages.get(box)
@@ -178,9 +220,24 @@ class OverlayWindow(QWidget):
                                         rgb.strides[0], QImage.Format_RGB888).copy()
                     qimages[box] = (rgb, qimage)
                     blurs.append((box, qimage))
+                if render_boxes and self.effect.mode=='blur' and frame_image is not None:
+                    complete=not pending and not waiting
+                    if waiting:
+                        blurs=frozen
+                    elif self._motion_active:
+                        now=time.monotonic()
+                        if self._motion_fresh_at is None:self._motion_fresh_at=now
+                        if now-self._motion_fresh_at<=BlurCache.MAX_BRIDGE_SECONDS:
+                            bridge={box:tile for box,tile in frozen if box in pending}
+                            blurs.extend(bridge.items())
+                            pending=[box for box in pending if box not in bridge]
+                    if complete:
+                        self._motion_tiles={tokens[box]:(box,tile) for box,tile in blurs if box in tokens}
+                        self._motion_active=False
                 self.blurs, self._qimages = blurs, qimages
                 self._fallback_boxes = list(pending)
             except Exception as error:
+                self._motion_tiles={};self._motion_active=False
                 self._mask_error = type(error).__name__
                 # Invalid source/rendering retains only valid requested boxes.
                 # An invalid rectangle cannot justify covering unrelated pixels.
@@ -204,6 +261,7 @@ class OverlayWindow(QWidget):
             self.update()
 
     def _release_renderer(self):
+        self._motion_tiles={};self._motion_active=False
         self.mask_image = None
         # During a slow/failed release, preserve only the already validated
         # physical scope as opaque placeholders; never turn it into full-screen.
@@ -231,6 +289,8 @@ class OverlayWindow(QWidget):
         self.mask_image = None
         self.blurs, self._qimages = [], {}
         self.render_rectangles, self._visible_boxes = None, ()
+        self.render_bindings={};self.frame_captured_at=None
+        self._motion_tiles={};self._motion_active=False
         # A reused protected overlay waits for a fresh controller decision.
         self.rectangles, self.full, self._fallback_boxes = [], False, []
         super().hideEvent(event)

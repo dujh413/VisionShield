@@ -104,7 +104,7 @@ class ControlSafetyTests(unittest.TestCase):
         self.tick()
         self.assertTrue(p.protecting)
 
-    def test_local_ocr_sensitive_result_and_pending_content_stay_inside_selected_scope(self):
+    def test_local_ocr_sensitive_result_is_clipped_and_pending_content_stays_clear(self):
         p=self.panel
         p.app_profiles={'test':{'mode':'region','region':[0,0,.5,.5],'binding':{'handle':1,'pid':1}}}
         p.apply_preferences({'local_ocr_enabled':True})
@@ -118,7 +118,8 @@ class ControlSafetyTests(unittest.TestCase):
         self.assertEqual(p.overlay.set_masks.call_args.args[0],[(10.,10.,22.,15.)])
         p.content.result=None
         self.tick()
-        self.assertEqual(p.overlay.set_masks.call_args.args[0],[(0,0,32,32)])
+        self.assertEqual(p.overlay.set_masks.call_args.args[0],[])
+        self.assertIn('等待敏感文字识别',p.status.text())
 
     def test_fully_occluded_selection_keeps_transparent_overlay_and_warm_render_scope(self):
         p=self.panel
@@ -131,6 +132,21 @@ class ControlSafetyTests(unittest.TestCase):
         p.overlay.hide.assert_not_called()
         self.assertEqual(p.overlay.set_masks.call_args.args[0],[])
         self.assertEqual(p.overlay.set_masks.call_args.kwargs['render_rectangles'],[(0,0,64,64)])
+
+    def test_local_ocr_never_turns_unknown_or_low_confidence_coverage_into_whole_selection(self):
+        p=self.panel
+        p.app_profiles={'test':{'mode':'region','region':[0,0,1,1],'binding':{'handle':1,'pid':1}}}
+        p.apply_preferences({'local_ocr_enabled':True})
+        p.camera.risk.return_value=(True,'模拟风险')
+        for lines,unknown in (([],[(0,0,64,64)]),
+                              ([{'text':'unreadable','confidence':.2,
+                                 'polygon':[[10,10],[50,10],[50,25],[10,25]]}],[])):
+            p.latest.frame_id+=1;p.content.observe(p.latest)
+            p.content.accept({'frame_id':p.latest.frame_id,'captured_at':self.now,'image':p.latest.image,
+                              'lines':lines,'unknown_regions':unknown},self.now)
+            self.tick()
+            self.assertEqual(p.overlay.set_masks.call_args.args[0],[])
+            self.assertEqual(p.overlay.set_masks.call_args.kwargs['render_rectangles'],[])
 
     def test_same_safe_camera_packet_does_not_restore_after_ui_wait(self):
         self.panel.state=ProtectionState(restore_delay=1)
@@ -224,9 +240,9 @@ class ControlSafetyTests(unittest.TestCase):
 
     def test_irrelevant_background_z_order_change_still_allows_native_verification(self):
         p=self.panel;p.exclusion_verified=False;p.error=None
-        p.app_profiles={'test':{'mode':'window','binding':{'handle':1,'pid':1}}}
+        p.app_profiles={'test':{'mode':'window','binding':{'handle':100001,'pid':1}}}
         p.region_tracker=Mock();p.region_tracker.resolve.return_value={}
-        target={'key':'test','handle':1,'pid':1,'mode':'lines','rect':(0,0,64,64),'client':(0,0,64,64)}
+        target={'key':'test','handle':100001,'pid':1,'mode':'lines','rect':(0,0,64,64),'client':(0,0,64,64)}
         tray={'key':'tray','handle':2,'pid':2,'mode':'ignore','rect':(0,100,64,10),'client':(0,100,64,10)}
         inventory=[tray,target];capture=Mock()
         capture.grab.return_value=type('Frame',(),{'image':np.full((1000,1000,3),[255,255,0],dtype=np.uint8)})()

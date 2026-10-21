@@ -15,6 +15,11 @@ class BlurTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app=QApplication.instance() or QApplication([])
+        # Qt/cache regressions are device-independent. Installed-driver tests
+        # live in test_gpu_blur and the native-window validation process.
+        from gpu_blur import OpenClUnavailable
+        gpu=patch('gpu_blur.OpenClBoxBlur',side_effect=OpenClUnavailable('CPU Qt regression'))
+        gpu.start();cls.addClassCleanup(gpu.stop)
 
     def make_overlay(self, radius=2):
         with patch('overlay_window.exclude_capture'):
@@ -184,6 +189,62 @@ class BlurTests(unittest.TestCase):
             self.assertFalse(overlay._fallback_boxes)
             self.assertEqual(overlay.grab().toImage().pixelColor(60,60).getRgb(),(220,220,220,255))
         finally:overlay.close()
+
+    def test_bound_target_drag_uses_opaque_tile_until_post_move_capture_is_rendered(self):
+        overlay=self.make_overlay()
+        box=(30,50,80,40);binding=('demo',1,10,'region',(400,200))
+        image=np.full((200,400,3),220,np.uint8)
+        captured=time.monotonic()
+        try:
+            self.finish_blur(overlay,[box],image,padding=0)
+            overlay.set_masks([box],image=image,padding=0,render_bindings={box:binding},frame_captured_at=captured)
+            worker=overlay.blur_worker
+            # The capture is intentionally older than each native move, and
+            # contains black background at the new window position.
+            stale=np.zeros_like(image)
+            for x in range(120,220,5):
+                box=(x,70,80,40)
+                overlay.set_masks([box],image=stale,padding=0,render_bindings={box:binding},frame_captured_at=captured)
+                shot=overlay.grab().toImage()
+                self.assertFalse(overlay._fallback_boxes)
+                self.assertEqual(shot.pixelColor(x+10,80).getRgb(),(220,220,220,255))
+                self.assertEqual(shot.pixelColor(35,55).alpha(),0)
+                self.assertIs(overlay.blur_worker,worker)
+                time.sleep(.015)
+            time.sleep(overlay.MOVE_SETTLE_SECONDS+.01)
+            fresh=np.full_like(image,90);captured=time.monotonic()
+            deadline=time.monotonic()+3
+            while time.monotonic()<deadline:
+                overlay.set_masks([box],image=fresh,padding=0,render_bindings={box:binding},frame_captured_at=captured)
+                self.app.processEvents()
+                shot=overlay.grab().toImage()
+                self.assertEqual(shot.pixelColor(box[0]+10,80).alpha(),255)
+                if shot.pixelColor(box[0]+10,80).red()==90:break
+                time.sleep(.005)
+            else:self.fail('post-move capture did not replace frozen blur')
+        finally:overlay.close()
+
+    def test_motion_tiles_never_cross_binding_extent_or_strength_changes(self):
+        for change in ('binding','extent','strength'):
+            with self.subTest(change=change):
+                overlay=self.make_overlay()
+                image=np.full((200,400,3),220,np.uint8)
+                first=(30,50,80,40);binding=('demo',1,10)
+                try:
+                    self.finish_blur(overlay,[first],image,padding=0)
+                    overlay.set_masks([first],image=image,padding=0,render_bindings={first:binding})
+                    moved=(130,50,80,40)
+                    overlay.set_masks([moved],image=image,padding=0,render_bindings={moved:binding})
+                    self.assertTrue(overlay._motion_active)
+                    if change=='binding':binding=('demo',2,10)
+                    if change=='extent':moved=(130,50,90,40)
+                    if change=='strength':overlay.set_effect(parse_effect('32'))
+                    with patch.object(overlay.blur_worker,'poll',return_value=None):
+                        overlay.set_masks([moved],image=image,padding=0,render_bindings={moved:binding})
+                    self.assertFalse(overlay._motion_active)
+                    self.assertFalse(overlay.blurs)
+                    self.assertTrue(overlay._fallback_boxes)
+                finally:overlay.close()
 
     def test_close_timeout_reaches_controller_and_keeps_only_scoped_fallback(self):
         started, release = threading.Event(), threading.Event()

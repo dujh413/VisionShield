@@ -125,7 +125,8 @@ def region_scope(profile, window):
 
 
 def application_masks(windows, rectangles, uncertain, profiles=None, resolved=None,
-                      local_ocr_enabled=False, render_scopes=None):
+                      local_ocr_enabled=False, render_scopes=None, render_bindings=None,
+                      sensitive_rectangles=None):
     profiles=valid_profiles(profiles or {})
     if not windows:
         # 无法确认边界时不越过用户范围；状态栏提示范围暂不可用。
@@ -166,13 +167,18 @@ def application_masks(windows, rectangles, uncertain, profiles=None, resolved=No
             # 无有效校准时整应用保护，不猜对话区域。
         local_ocr=local_ocr_enabled and profile and mode in ('region','tracked','chat')
         selected=([] if not scope_valid else
-                  [clip for candidate in rectangles if (clip:=intersect(candidate,scope))] if local_ocr and not uncertain else
+                  [clip for candidate in (rectangles if sensitive_rectangles is None else sensitive_rectangles)
+                   if (clip:=intersect(candidate,scope))] if local_ocr else
                   [scope] if mode in ('window','chat','tracked','region') else
                   [rect] if uncertain and mode!='ignore' else
                   [clip for candidate in rectangles if (clip:=intersect(candidate,rect))] if mode!='ignore' else [])
         # Render against stable protection bounds. Foreground motion changes
         # only the final visible clip, not blur job geometry or GPU ownership.
         if render_scopes is not None:render_scopes.extend(selected)
+        if render_bindings is not None and mode in ('window','region') and not local_ocr:
+            for selected_rect in selected:
+                render_bindings[selected_rect]=(window['key'],window['handle'],window['pid'],
+                    repr(profile),tuple(window['client'][2:]))
         # 程序自身始终保持可见，不能依赖Qt置顶窗口的瞬时排序。
         for cover in covers+excluded:
             selected=[part for candidate in selected for part in subtract(candidate,cover)]

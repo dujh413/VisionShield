@@ -615,7 +615,7 @@ class Shell(QWidget):
         ocr_row.addWidget(ocr_label, 1)
         ocr_row.addWidget(local_ocr)
         layout.addLayout(ocr_row)
-        ocr_note = QLabel('开启：风险出现时，用本地OCR识别手机号、邮箱、证件号及标签关联的敏感文字，只处理命中或待分析部分。关闭：保护整个选区。识别未完成时临时保护选区，不影响整窗设置。')
+        ocr_note = QLabel('开启：风险出现时，只模糊选区内OCR识别命中的敏感文字，其余保持清晰。未命中或等待识别时不整区遮盖，识别漏检的内容不会自动保护。关闭：保护整个选区。不影响整窗设置。')
         ocr_note.setObjectName('caption')
         ocr_note.setWordWrap(True)
         layout.addWidget(ocr_note)

@@ -28,13 +28,15 @@ class SelectedScopeTests(unittest.TestCase):
         self.assertEqual(application_masks([window(1)],[],True,saved,{}),([],False))
         self.assertIn('局部配置需暂停后重新框选',profile_status(saved,[window(1)],{}))
 
-    def test_region_ocr_only_masks_intersection_with_sensitive_or_unknown_parts(self):
+    def test_region_ocr_only_masks_sensitive_intersections_even_when_uncertain(self):
         profile=self.region_profile();target=window(1)
         hits=[(140,150,40,20),(200,200,40,20),(500,350,50,20)]
         self.assertEqual(application_masks([target],hits,False,profile,{},True),
                          ([(150,150,30,20),(200,200,40,20)],False))
         self.assertEqual(application_masks([target],[],False,profile,{},True),([],False))
-        self.assertEqual(application_masks([target],[],True,profile,{},True),([(150,140,200,200)],False))
+        self.assertEqual(application_masks([target],[],True,profile,{},True),([],False))
+        self.assertEqual(application_masks([target],[(100,100,500,400)],True,profile,{},True,
+                                          sensitive_rectangles=[(200,200,40,20)]),([(200,200,40,20)],False))
         self.assertEqual(application_masks([target],hits,False,profile,{},False),([(150,140,200,200)],False))
 
     def test_ocr_switch_keeps_whole_window_policy_and_legacy_local_scope(self):
