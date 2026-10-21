@@ -313,8 +313,26 @@ class Shell(QWidget):
         if hasattr(self.backend, 'updated'):
             self.backend.updated.connect(self.backend_updated)
         self.set_state('paused')
-        self.setMinimumHeight(self.minimumSizeHint().height())
         self.resize(520, self.sizeHint().height())
+
+    def update_detail_height(self):
+        # Word-wrapped diagnostics grow after startup. Reserve their actual
+        # height rather than shrinking the effect selector's button contents.
+        margins = self.layout().contentsMargins()
+        width = max(1,self.width()-margins.left()-margins.right())
+        key = (self.detail.text(),width,self.detail.font().key())
+        if key != getattr(self,'_detail_layout_key',None):
+            self._detail_layout_key = key
+            # heightForWidth observes the old minimum too. Remove it first so
+            # a shorter message or a wider window can release unused space.
+            self.detail.setMinimumHeight(36)
+            self.detail.setMinimumHeight(max(36,self.detail.heightForWidth(width)))
+        self.setMinimumHeight(max(self.layout().minimumSize().height(),
+                                  self.layout().totalHeightForWidth(self.width())))
+
+    def resizeEvent(self,event):
+        super().resizeEvent(event)
+        if hasattr(self,'detail'):self.update_detail_height()
 
     def change_effect(self, key, value):
         self.settings.setValue(key, bool(value))
@@ -399,6 +417,7 @@ class Shell(QWidget):
         self.tray_toggle.setText(action)
         self.tray_toggle.setEnabled(self.toggle.isEnabled())
         self.detail.setText(detail or ('当前桌面未受保护。启用后开始本地检测。' if state == 'paused' else '请稍候。'))
+        self.update_detail_height()
         self.tray.setToolTip('视界盾 · '+title)
         self.refresh_identity_status()
 

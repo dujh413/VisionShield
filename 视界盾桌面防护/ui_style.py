@@ -22,6 +22,7 @@ STYLE = '''
     QPushButton#primary, QPushButton#save { background: #203a2d; border-color: #203a2d; color: white; font-weight: 600; }
     QPushButton#primary:hover, QPushButton#save:hover { background: #28513b; }
     QPushButton#segment { padding: 6px 20px; }
+    QPushButton#segment:focus { padding: 5px 19px; }
     QPushButton#segment:checked { background: #dcebe2; color: #1e6243; border-color: #24724f; font-weight: 600; }
     QPushButton#textAction { border: none; padding: 4px 0; color: #24724f; text-align: left; }
     QPushButton#textAction:focus { border: 1px solid #24724f; padding: 3px 0; }

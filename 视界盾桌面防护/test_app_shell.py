@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 from PySide6.QtCore import QObject, QProcess, QSettings, QTimer, Signal
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, QPushButton, QScrollArea
+from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, QPushButton, QScrollArea, QStyle, QStyleOptionButton
 from app_shell import Shell, Backend
 
 
@@ -132,6 +132,41 @@ class ShellTests(unittest.TestCase):
         self.assertGreater(self.panel.effect_input.slider.width(),100)
         self.assertTrue(self.panel.rect().contains(self.panel.toggle.geometry()))
         self.assertTrue(self.panel.rect().contains(self.panel.scope_summary.geometry()))
+
+    def test_multiline_running_status_does_not_compress_effect_button_text(self):
+        self.panel.show();self.app.processEvents()
+        message=('应用区域保护 · 机主未确认\nOCR：已读取6行，有效敏感1条\n'
+                 '已定位1/2个指定范围；局部配置需暂停后重新框选；'
+                 '未定位的范围暂停遮蔽，请暂停后重新选择；不会扩大保护')
+        for width in (520,480,680):
+            with self.subTest(width=width):
+                self.panel.resize(width,self.panel.height())
+                for state,detail in (('running',message),('running',message+'；请检查所选窗口'),('paused',None)):
+                    self.panel.set_state(state,detail)
+                    self.app.processEvents();self.app.processEvents()
+                    control=self.panel.effect_input
+                    self.assertGreaterEqual(control.height(),control.minimumSizeHint().height())
+                    self.assertGreaterEqual(self.panel.detail.height(),
+                                            self.panel.detail.heightForWidth(self.panel.detail.width()))
+                    for button in control.mode_buttons.values():
+                        for focused in (False,True):
+                            if focused:button.setFocus()
+                            else:button.clearFocus()
+                            option=QStyleOptionButton();button.initStyleOption(option)
+                            contents=button.style().subElementRect(QStyle.SE_PushButtonContents,option,button)
+                            self.assertGreaterEqual(contents.height(),button.fontMetrics().height())
+                            self.assertGreaterEqual(contents.width(),button.fontMetrics().horizontalAdvance(button.text()))
+
+    def test_short_status_releases_previous_multiline_minimum_height(self):
+        self.panel.show();self.app.processEvents()
+        self.panel.set_state('running','测试状态说明，所选范围需要重新选择。'*24)
+        self.app.processEvents()
+        large=self.panel.detail.minimumHeight()
+        self.panel.set_state('paused')
+        self.app.processEvents()
+        self.assertGreater(large,36)
+        self.assertEqual(self.panel.detail.minimumHeight(),36)
+        self.assertGreaterEqual(self.panel.minimumWidth(),480)
 
     def test_settings_scroll_leaves_save_and_cancel_visible(self):
         def inspect_dialog():

@@ -1,6 +1,6 @@
 """轻量原生效果选择；不加载图像库或识别模型。"""
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QButtonGroup, QComboBox, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QButtonGroup, QComboBox, QHBoxLayout, QLabel, QLayout, QPushButton, QSlider, QVBoxLayout, QWidget
 
 from mask_effect import parse_effect
 
@@ -35,6 +35,7 @@ class EffectControls(QWidget):
         self.explanation.setObjectName('caption')
         self.explanation.setWordWrap(True)
         layout = QVBoxLayout(self)
+        layout.setSizeConstraint(QLayout.SetMinimumSize)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         row = QHBoxLayout()
