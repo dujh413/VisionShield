@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
-from PySide6.QtCore import QObject, QProcess, QSettings, QTimer, Signal
+from PySide6.QtCore import QObject, QProcess, QSettings, QTimer, Signal, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, QPushButton, QScrollArea, QStyle, QStyleOptionButton
 from app_shell import Shell, Backend
@@ -186,6 +186,7 @@ class ShellTests(unittest.TestCase):
 
     def test_status_updates_do_not_repeatedly_raise_control_window(self):
         self.panel.show()
+        self.assertFalse(self.panel.windowFlags() & Qt.WindowStaysOnTopHint)
         with patch.object(self.panel,'raise_') as raise_window:
             for _ in range(5):
                 self.backend.changed.emit('running','匿名状态')
@@ -197,6 +198,7 @@ class ShellTests(unittest.TestCase):
         buttons=[]
         def inspect_dialog():
             dialog=self.app.activeModalWidget()
+            self.assertFalse(dialog.windowFlags() & Qt.WindowStaysOnTopHint)
             descriptions.extend(label.text() for label in dialog.findChildren(QLabel))
             buttons.extend(dialog.findChild(QPushButton, name)
                            for name in ('selectLocalScope', 'selectWindowScope', 'textAction'))
@@ -207,7 +209,7 @@ class ShellTests(unittest.TestCase):
         QTimer.singleShot(0,inspect_dialog)
         with patch('overlay_window.exclude_capture') as exclusion:
             self.panel.open_settings()
-        exclusion.assert_called_once()
+        exclusion.assert_not_called()
         text='\n'.join(descriptions)
         self.assertIn('其他区域保持清晰',text)
         self.assertIn('暂停该选区遮蔽',text)
@@ -506,11 +508,9 @@ class ShellTests(unittest.TestCase):
         self.assertFalse(self.panel.toggle.isChecked())
         self.assertEqual(self.backend.starts, 0)
         self.panel.preview = False
-        with patch('overlay_window.exclude_capture', side_effect=RuntimeError):
+        with patch('overlay_window.exclude_capture', side_effect=RuntimeError) as exclusion:
             self.panel.toggle.click()
-        self.assertFalse(self.panel.toggle.isChecked())
-        with patch('overlay_window.exclude_capture'):
-            self.panel.toggle.click()
+        exclusion.assert_not_called()
         self.assertTrue(self.panel.toggle.isChecked())
         self.backend.changed.emit('running', '模拟已启动')
         self.panel.toggle.click()
