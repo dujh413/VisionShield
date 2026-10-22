@@ -203,7 +203,6 @@ class Shell(QWidget):
         self.session_profiles = {}
         self.latest_status = {}
         self.setWindowTitle('视界盾')
-        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         self.setWindowIcon(shield_icon())
         self.setMinimumWidth(480)
         self.setStyleSheet(STYLE)
@@ -453,18 +452,12 @@ class Shell(QWidget):
         self.bystander_status.setText(bystander)
 
     def toggle_guard(self):
-        # 点击开关先恢复已确认状态；捕获排除失败或预览模式不能显示已启用。
+        # 点击开关先恢复已确认状态；预览模式不能显示已启用。
         self.toggle.setChecked(self.state in ('starting', 'running', 'error'))
         if self.preview:
             self.detail.setText('界面预览模式：防护未运行。正常启动软件后可启用。')
             return
         if self.state == 'paused':
-            from overlay_window import exclude_capture
-            try:
-                exclude_capture(self)
-            except Exception:
-                self.detail.setText('无法将控制窗口排除出屏幕采集，请检查Windows支持情况。')
-                return
             self.backend.shield_enabled = self.settings.value('shield_enabled', True, type=bool)
             self.backend.app_profiles = self.load_profiles()
             self.apply_effect_text()
@@ -531,9 +524,6 @@ class Shell(QWidget):
         dialog.setWindowIcon(self.windowIcon())
         dialog.setWindowTitle('设置 · 视界盾')
         dialog.setMinimumWidth(520)
-        if self.state in ('starting', 'running'):
-            from overlay_window import exclude_capture
-            exclude_capture(dialog)
         outer = QVBoxLayout(dialog)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
